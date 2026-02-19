@@ -44,6 +44,8 @@ static bool g_quit_requested   = false;
 static std::atomic<bool> g_sync_stop{false};
 static std::thread       g_sync_thread;
 
+static void color_table_reset(void);  /* forward declaration */
+
 /* ---- helpers ---- */
 
 static int scan_chats(char names[][64])
@@ -98,6 +100,7 @@ static void open_chat(const char *name)
         g_screen = Screen::ChatView;
         g_scroll_to_bottom = true;
         g_msg_input[0] = '\0';
+        color_table_reset();
     }
 }
 
@@ -166,6 +169,49 @@ static void begin_fullscreen(const char *id)
         ImGuiWindowFlags_NoMove     |
         ImGuiWindowFlags_NoScrollbar|
         ImGuiWindowFlags_NoScrollWithMouse);
+}
+
+/* ---- per-entity colour assignment ---- */
+
+static const ImVec4 k_colors[] = {
+    {0.30f, 0.80f, 1.00f, 1.f},  // cyan
+    {1.00f, 0.80f, 0.20f, 1.f},  // yellow
+    {0.40f, 1.00f, 0.40f, 1.f},  // green
+    {1.00f, 0.50f, 0.30f, 1.f},  // orange
+    {0.90f, 0.40f, 0.90f, 1.f},  // magenta
+    {0.40f, 0.90f, 0.90f, 1.f},  // teal
+    {1.00f, 0.70f, 0.70f, 1.f},  // pink
+    {0.75f, 0.75f, 1.00f, 1.f},  // lavender
+};
+static constexpr int k_ncolors = (int)(sizeof(k_colors) / sizeof(k_colors[0]));
+
+static char g_eid_map[k_ncolors][17] = {};
+static int  g_eid_count = 0;
+
+static void color_table_reset(void)
+{
+    memset(g_eid_map, 0, sizeof(g_eid_map));
+    g_eid_count = 0;
+}
+
+/* Assign colours sequentially as new entity_ids are first seen.
+   Guarantees no collision for up to k_ncolors unique participants. */
+static ImVec4 color_for(const char *eid)
+{
+    if (!eid || eid[0] == '\0')
+        return ImVec4(0.6f, 0.6f, 0.6f, 1.f);
+    for (int i = 0; i < g_eid_count; i++)
+        if (strcmp(g_eid_map[i], eid) == 0)
+            return k_colors[i];
+    if (g_eid_count < k_ncolors) {
+        strncpy(g_eid_map[g_eid_count], eid, 16);
+        g_eid_map[g_eid_count][16] = '\0';
+        return k_colors[g_eid_count++];
+    }
+    /* More than k_ncolors unique IDs: fall back to hash (collisions possible) */
+    unsigned h = 0;
+    for (const char *p = eid; *p; p++) h = h * 31u + (unsigned char)*p;
+    return k_colors[h % k_ncolors];
 }
 
 /* ---- chat list screen ---- */
@@ -302,18 +348,15 @@ static void draw_chat_view(void)
     ImGui::BeginChild("##msgs", ImVec2(0, -input_height), false);
 
     const proto_messages *msgs = nullptr;
-    if (g_chat_open) {
-        proto_db_rdlock();
-        msgs = proto_list(&g_chat);
-        proto_db_unlock();
-    }
+    if (g_chat_open)
+        msgs = proto_list(&g_chat);  /* proto_list locks internally via db_read */
 
     if (msgs) {
+        /* Reset colour table every frame so colours always reflect the current
+           sorted order, even after a re-walk triggered by sync. */
+        color_table_reset();
         for (int i = 0; i < msgs->count; i++) {
-            if (msgs->sender[i] == 0)
-                ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "%s", msgs->texts[i]);
-            else
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", msgs->texts[i]);
+            ImGui::TextColored(color_for(msgs->entity_ids[i]), "%s", msgs->texts[i]);
         }
     }
 

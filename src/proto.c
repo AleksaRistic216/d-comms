@@ -212,6 +212,8 @@ int proto_initialize(proto_chat *chat, char *out_user_key, char *out_secret_id)
     strncpy(chat->raw_listen_id, fid, sizeof(chat->raw_listen_id) - 1);
     hash_prefix(fid, chat->listen_prefix);
 
+    gen_hex(chat->entity_id, 8);
+
     chat->is_initiator = 1;
     chat->has_sent_fid = 1;
     chat->state = 1;
@@ -243,6 +245,23 @@ void proto_join(proto_chat *chat, const char *user_key, const char *secret_id)
     chat->raw_listen_id[0] = '\0';
     chat->has_sent_fid = 0;
     chat->state = 2;
+
+    gen_hex(chat->entity_id, 8);
+}
+
+/* Returns 1 if s looks like a raw FID: exactly ID_BYTES*2 lowercase hex chars,
+   no newline.  Used to detect stray FIDs written by racing clients. */
+static int is_fid(const char *s)
+{
+    if (!s) return 0;
+    size_t len = strlen(s);
+    if (len != (size_t)(ID_BYTES * 2)) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return 0;
+    }
+    return 1;
 }
 
 static void do_chain_walk(proto_chat *chat)
@@ -251,9 +270,10 @@ static void do_chain_walk(proto_chat *chat)
 
     int cap = 16;
     chat->msgs.texts = malloc(sizeof(char *) * (size_t)cap);
+    chat->msgs.entity_ids = malloc(sizeof(char *) * (size_t)cap);
     chat->msgs.sender = malloc(sizeof(int) * (size_t)cap);
     chat->msgs.count = 0;
-    if (!chat->msgs.texts || !chat->msgs.sender) return;
+    if (!chat->msgs.texts || !chat->msgs.entity_ids || !chat->msgs.sender) return;
 
     char cur[PREFIX_BYTES * 2 + 1];
     strncpy(cur, chat->initial_prefix, sizeof(cur) - 1);
@@ -271,36 +291,115 @@ static void do_chain_walk(proto_chat *chat)
         strncpy(last_prefix, cur, sizeof(last_prefix) - 1);
         last_prefix[sizeof(last_prefix) - 1] = '\0';
 
-        char *fid = decrypt_from_hex(chat->aes_key, chat->hmac_key, hex[0]);
-        free(hex[0]);
+        /* Decrypt all entries in this group.
+           - FIDs: pick the canonical one = smallest encrypted hex string, so
+             all clients agree regardless of DB file order.
+           - Messages: collect with timestamp, sort for consistent display. */
+
+        struct grp_msg {
+            char *eid;
+            char *text;
+            char *sort_hex;  /* encrypted hex — sort key, uncontrollable by sender */
+        };
+        struct grp_msg *mbuf = malloc(sizeof(struct grp_msg) * (size_t)count);
+        int mcount = 0;
+
+        char *fid     = NULL;
+        char *fid_hex = NULL;  /* encrypted hex string of winning FID */
+
+        for (int i = 0; i < count; i++) {
+            char *plain = decrypt_from_hex(chat->aes_key, chat->hmac_key, hex[i]);
+            if (!plain) { free(hex[i]); continue; }
+
+            if (is_fid(plain)) {
+                /* Smallest encrypted hex wins → deterministic across all clients */
+                if (!fid_hex || strcmp(hex[i], fid_hex) < 0) {
+                    free(fid);
+                    free(fid_hex);
+                    fid     = plain;
+                    fid_hex = hex[i];   /* takes ownership */
+                } else {
+                    free(plain);
+                    free(hex[i]);
+                }
+            } else {
+                /* Parse: entity_id(16) '\n' text
+                   Falls back to empty eid for old-format messages. */
+                const char *nl = strchr(plain, '\n');
+                char *eid;
+                char *text;
+                if (nl && (nl - plain) == 16) {
+                    eid  = strndup(plain, 16);
+                    text = strdup(nl + 1);
+                    free(plain);
+                } else {
+                    eid  = strdup("");
+                    text = plain;
+                }
+                if (mbuf) {
+                    mbuf[mcount].eid      = eid;
+                    mbuf[mcount].text     = text;
+                    mbuf[mcount].sort_hex = hex[i];  /* takes ownership */
+                    mcount++;
+                } else {
+                    free(eid);
+                    free(text);
+                    free(hex[i]);
+                }
+            }
+        }
+        free(hex);
+
         if (!fid) {
-            for (int i = 1; i < count; i++) free(hex[i]);
-            free(hex);
+            for (int i = 0; i < mcount; i++) {
+                free(mbuf[i].eid);
+                free(mbuf[i].text);
+                free(mbuf[i].sort_hex);
+            }
+            free(mbuf);
+            free(fid_hex);
             break;
         }
+        free(fid_hex);
+
         strncpy(last_raw_fid, fid, sizeof(last_raw_fid) - 1);
         last_raw_fid[sizeof(last_raw_fid) - 1] = '\0';
 
-        int sender = groups % 2;
-        for (int i = 1; i < count; i++) {
-            char *plain = decrypt_from_hex(chat->aes_key, chat->hmac_key, hex[i]);
-            free(hex[i]);
-            if (plain) {
-                if (chat->msgs.count >= cap) {
-                    cap *= 2;
-                    char **tt = realloc(chat->msgs.texts, sizeof(char *) * (size_t)cap);
-                    int *ts = realloc(chat->msgs.sender, sizeof(int) * (size_t)cap);
-                    if (!tt || !ts) { free(plain); continue; }
-                    chat->msgs.texts = tt;
-                    chat->msgs.sender = ts;
-                }
-                chat->msgs.texts[chat->msgs.count] = plain;
-                chat->msgs.sender[chat->msgs.count] = sender;
-                chat->msgs.count++;
+        /* Sort by encrypted hex string — determined by the random AES IV,
+           not the sender's clock, so no client can influence their position. */
+        for (int i = 1; i < mcount; i++) {
+            struct grp_msg tmp = mbuf[i];
+            int j = i - 1;
+            while (j >= 0 && strcmp(mbuf[j].sort_hex, tmp.sort_hex) > 0) {
+                mbuf[j + 1] = mbuf[j];
+                j--;
             }
+            mbuf[j + 1] = tmp;
         }
 
-        free(hex);
+        int sender = groups % 2;
+        for (int i = 0; i < mcount; i++) {
+            if (chat->msgs.count >= cap) {
+                cap *= 2;
+                char **tt  = realloc(chat->msgs.texts,      sizeof(char *) * (size_t)cap);
+                char **tei = realloc(chat->msgs.entity_ids, sizeof(char *) * (size_t)cap);
+                int  *ts   = realloc(chat->msgs.sender,     sizeof(int)    * (size_t)cap);
+                if (!tt || !tei || !ts) {
+                    free(mbuf[i].eid); free(mbuf[i].text); free(mbuf[i].sort_hex);
+                    continue;
+                }
+                chat->msgs.texts      = tt;
+                chat->msgs.entity_ids = tei;
+                chat->msgs.sender     = ts;
+            }
+            chat->msgs.entity_ids[chat->msgs.count] = mbuf[i].eid;
+            chat->msgs.texts[chat->msgs.count]      = mbuf[i].text;
+            chat->msgs.sender[chat->msgs.count]     = sender;
+            chat->msgs.count++;
+            free(mbuf[i].sort_hex);
+        }
+        free(mbuf);
+
         groups++;
         hash_prefix(fid, cur);
         free(fid);
@@ -361,6 +460,14 @@ int proto_send(proto_chat *chat, const char *msg)
     if (chat->state == 0 || chat->send_prefix[0] == '\0') return -1;
 
     if (!chat->has_sent_fid) {
+        /* Re-sync before writing the FID: another client may have already
+           started this group.  If so, do_chain_walk will flip has_sent_fid
+           to 1 and we skip writing a duplicate FID. */
+        chat->cache_valid = 0;
+        do_chain_walk(chat);
+    }
+
+    if (!chat->has_sent_fid) {
         char new_fid[ID_BYTES * 2 + 1];
         if (gen_hex(new_fid, ID_BYTES) != 0) return -1;
 
@@ -377,7 +484,10 @@ int proto_send(proto_chat *chat, const char *msg)
         chat->has_sent_fid = 1;
     }
 
-    char *enc_msg = encrypt_to_hex(chat->aes_key, chat->hmac_key, msg);
+    /* Format: entity_id (16 hex) + '\n' + user message */
+    char tagged[MAX_MSG + 20];
+    snprintf(tagged, sizeof(tagged), "%s\n%s", chat->entity_id, msg);
+    char *enc_msg = encrypt_to_hex(chat->aes_key, chat->hmac_key, tagged);
     if (enc_msg) {
         db_append(chat->send_prefix, enc_msg);
         free(enc_msg);
@@ -393,8 +503,11 @@ void proto_messages_free(proto_messages *msgs)
     for (int i = 0; i < msgs->count; i++)
         free(msgs->texts[i]);
     free(msgs->texts);
+    for (int i = 0; i < msgs->count; i++)
+        free(msgs->entity_ids[i]);
+    free(msgs->entity_ids);
     free(msgs->sender);
-    msgs->texts = NULL;
+    msgs->texts = msgs->entity_ids = NULL;
     msgs->sender = NULL;
     msgs->count = 0;
 }
@@ -424,6 +537,7 @@ int proto_save_chat(const proto_chat *chat, const char *name, const char *basedi
     fprintf(f, "user_key=%s\n", chat->user_key);
     fprintf(f, "secret_id=%s\n", chat->secret_id);
     fprintf(f, "is_initiator=%d\n", chat->is_initiator);
+    fprintf(f, "entity_id=%s\n", chat->entity_id);
     fclose(f);
     return 0;
 }
@@ -448,6 +562,8 @@ int proto_load_chat(proto_chat *chat, const char *name, const char *basedir)
             strncpy(chat->secret_id, line + 10, sizeof(chat->secret_id) - 1);
         else if (strncmp(line, "is_initiator=", 13) == 0)
             chat->is_initiator = atoi(line + 13);
+        else if (strncmp(line, "entity_id=", 10) == 0)
+            strncpy(chat->entity_id, line + 10, sizeof(chat->entity_id) - 1);
     }
     fclose(f);
 

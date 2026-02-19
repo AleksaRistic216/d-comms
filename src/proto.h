@@ -16,8 +16,9 @@ extern "C" {
 
 typedef struct {
     char **texts;
-    int *sender; /* 0=initiator, 1=responder */
-    int count;
+    char **entity_ids;   /* per-message 16-hex-char anonymous ID */
+    int  *sender;        /* 0=initiator, 1=responder */
+    int   count;
 } proto_messages;
 
 typedef struct {
@@ -29,6 +30,7 @@ typedef struct {
     char raw_listen_id[64];
     char user_key[ID_BYTES * 2 + 1];
     char secret_id[ID_BYTES * 2 + 1];
+    char entity_id[17];   /* this client's anonymous 8-byte ID for this chat */
     int is_initiator;
     int has_sent_fid;
     int state; /* 0=uninit, 1=can_send, 2=need_list */
