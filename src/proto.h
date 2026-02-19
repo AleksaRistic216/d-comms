@@ -14,6 +14,17 @@ extern "C" {
 #define MAX_MSG      4096
 #define PREFIX_BYTES 16
 
+/*
+ * KDF_ROUNDS: number of SHA-256 iterations used by derive_keys().
+ * Each join/load derives keys once; an attacker must pay this cost per guess.
+ * Override at compile time: -DKDF_ROUNDS=10 for tests.
+ * Default (2 000 000) ≈ 5 s on a typical CPU with this pure-C SHA-256.
+ * Exact time varies by hardware; adjust and re-measure if needed.
+ */
+#ifndef KDF_ROUNDS
+#define KDF_ROUNDS 2000000
+#endif
+
 typedef struct {
     char **texts;
     char **entity_ids;   /* per-message 16-hex-char anonymous ID */

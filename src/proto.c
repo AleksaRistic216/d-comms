@@ -46,13 +46,28 @@ static void hash_prefix(const char *raw_id, char *out)
     out[PREFIX_BYTES * 2] = '\0';
 }
 
-static void derive_keys(const char *user_key,
+/*
+ * Slow KDF: hash secret_id-salted strings then iterate SHA-256 KDF_ROUNDS
+ * times.  An attacker must pay this cost per credential guess; legitimate
+ * users pay it once per proto_initialize / proto_join / proto_load_chat.
+ */
+static void derive_keys(const char *user_key, const char *secret_id,
                         uint8_t aes_key[32], uint8_t hmac_key[32])
 {
-    sha256((const uint8_t *)user_key, strlen(user_key), aes_key);
-    char buf[128];
-    int n = snprintf(buf, sizeof(buf), "hmac:%s", user_key);
+    char buf[256];
+    int n;
+
+    /* AES key: iterate SHA-256 starting from SHA-256("aes:<key>:<salt>") */
+    n = snprintf(buf, sizeof(buf), "aes:%s:%s", user_key, secret_id);
+    sha256((const uint8_t *)buf, (size_t)n, aes_key);
+    for (int i = 0; i < KDF_ROUNDS; i++)
+        sha256(aes_key, 32, aes_key);
+
+    /* HMAC key: same scheme with a different domain prefix */
+    n = snprintf(buf, sizeof(buf), "hmac:%s:%s", user_key, secret_id);
     sha256((const uint8_t *)buf, (size_t)n, hmac_key);
+    for (int i = 0; i < KDF_ROUNDS; i++)
+        sha256(hmac_key, 32, hmac_key);
 }
 
 static int hex_to_bin(const char *hex, size_t hex_len, uint8_t *bin)
@@ -201,7 +216,7 @@ int proto_initialize(proto_chat *chat, char *out_user_key, char *out_secret_id)
     strncpy(chat->user_key, user_key, sizeof(chat->user_key) - 1);
     strncpy(chat->secret_id, secret_id, sizeof(chat->secret_id) - 1);
 
-    derive_keys(user_key, chat->aes_key, chat->hmac_key);
+    derive_keys(user_key, secret_id, chat->aes_key, chat->hmac_key);
 
     char hprefix[PREFIX_BYTES * 2 + 1];
     hash_prefix(secret_id, hprefix);
@@ -235,7 +250,7 @@ void proto_join(proto_chat *chat, const char *user_key, const char *secret_id)
     strncpy(chat->user_key, user_key, sizeof(chat->user_key) - 1);
     strncpy(chat->secret_id, secret_id, sizeof(chat->secret_id) - 1);
 
-    derive_keys(user_key, chat->aes_key, chat->hmac_key);
+    derive_keys(user_key, secret_id, chat->aes_key, chat->hmac_key);
 
     hash_prefix(secret_id, chat->listen_prefix);
     strncpy(chat->initial_prefix, chat->listen_prefix, sizeof(chat->initial_prefix) - 1);
@@ -567,7 +582,7 @@ int proto_load_chat(proto_chat *chat, const char *name, const char *basedir)
     }
     fclose(f);
 
-    derive_keys(chat->user_key, chat->aes_key, chat->hmac_key);
+    derive_keys(chat->user_key, chat->secret_id, chat->aes_key, chat->hmac_key);
     hash_prefix(chat->secret_id, chat->initial_prefix);
     chat->state = 2;
 
