@@ -4,7 +4,25 @@ set(CMAKE_C_STANDARD 99)
 
 find_package(Threads REQUIRED)
 
+include(FetchContent)
+FetchContent_Declare(jech_dht
+    GIT_REPOSITORY https://github.com/jech/dht.git
+    GIT_TAG        master)
+FetchContent_MakeAvailable(jech_dht)
+
 add_library(dcomms_core STATIC
-    src/proto.c src/sync.c src/aes.c src/sha256.c)
-target_include_directories(dcomms_core PUBLIC src)
+    src/proto.c src/sync.c src/aes.c src/sha256.c
+    src/dht_client.c src/upnp.c
+    ${jech_dht_SOURCE_DIR}/dht.c)
+target_include_directories(dcomms_core PUBLIC
+    src
+    ${jech_dht_SOURCE_DIR})
 target_link_libraries(dcomms_core PUBLIC Threads::Threads)
+
+enable_testing()
+
+foreach(t crypto proto sync)
+    add_executable(test_${t} tests/test_${t}.c)
+    target_link_libraries(test_${t} PRIVATE dcomms_core)
+    add_test(NAME ${t} COMMAND test_${t})
+endforeach()
