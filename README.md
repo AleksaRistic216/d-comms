@@ -49,9 +49,6 @@ d-comms is designed for situations where you want private communication without 
 ### Limitations and Trade-offs
 
 - **Key exchange is out-of-band.** The library does not solve the initial secret-sharing problem. `user_key` and `secret_id` must be transmitted through a separate trusted channel before communication begins.
-- **Turn-based, not real-time.** The protocol alternates sides; a responder cannot send until the initiator has written at least one message. This is a deliberate property of the chain structure, not a bug — it prevents both sides from advancing the chain simultaneously.
-- **No relay for symmetric NAT or CGNAT.** Peers behind carrier-grade NAT that block simultaneous TCP opens will not connect. Adding a relay is an application-level concern.
-- **Single shared key per side.** All participants on the same side (initiator or responder) share the same AES/HMAC keys. This is suitable for small groups where all members are mutually trusted. It is not a forward-secret or per-member-encrypted design.
 
 ---
 
@@ -352,7 +349,6 @@ Most peers are behind NAT. Two complementary techniques are applied automaticall
 | Same LAN | Multicast discovery |
 | Different networks, UPnP-capable router | UPnP port mapping |
 | Behind NAT, no UPnP, non-symmetric NAT | TCP hole punching |
-| CGNAT / symmetric NAT | Not resolved (relay required) |
 
 ### Sync Protocol
 
