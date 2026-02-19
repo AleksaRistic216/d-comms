@@ -8,6 +8,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,8 +23,23 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Pack release
+        run: |
+          mkdir -p release/include
+          cp build/libdcomms_core.a release/
+          cp src/*.h release/include/
+          tar -czf libdcomms_core.tar.gz -C release .
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: libdcomms_core
-          path: build/libdcomms_core.a
+          path: libdcomms_core.tar.gz
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest
+          files: libdcomms_core.tar.gz
+          make_latest: true
