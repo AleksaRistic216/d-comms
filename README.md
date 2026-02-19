@@ -8,6 +8,10 @@ No server. No network daemon. Peers discover each other automatically — on the
 ## Table of Contents
 
 - [Overview](#overview)
+- [Why d-comms](#why-d-comms)
+  - [Purpose](#purpose)
+  - [Advantages](#advantages)
+  - [Limitations and Trade-offs](#limitations-and-trade-offs)
 - [Architecture](#architecture)
 - [The Protocol](#the-protocol)
   - [Key Derivation](#key-derivation)
@@ -47,6 +51,56 @@ The protocol has two **sides** (initiator and responder), not two hard-coded par
 - Internet discovery: Mainline DHT finds peers anywhere on the internet using the shared `user_key` as a rendezvous point — no server required
 - NAT traversal: UPnP port mapping (attempted automatically) and TCP hole punching (fallback)
 - Deterministic ordering: message order is agreed upon by all readers without timestamps
+
+---
+
+## Why d-comms
+
+Most encrypted messaging systems solve the privacy problem by trusting a smaller set of servers. d-comms removes the server entirely.
+
+### Purpose
+
+d-comms is designed for situations where you want private communication without any infrastructure:
+
+- **No account, no registration.** A chat session is created by exchanging two hex strings (32 chars each) through any channel you already trust — a QR code, a voice call, a shared note.
+- **No server to run or trust.** Peers find each other directly: on the same LAN via multicast UDP, across the internet via the BitTorrent Mainline DHT network, and through NAT via UPnP or TCP hole punching.
+- **Embeddable.** d-comms is a plain C99 static library with no runtime dependencies beyond pthreads. It links into any application — a TUI, a GUI, a daemon, or firmware.
+
+### Advantages
+
+**Over centralized messengers (Signal, WhatsApp, Telegram):**
+
+| | Signal / WhatsApp | d-comms |
+|---|---|---|
+| Requires phone number | Yes | No |
+| Requires account | Yes | No |
+| Central server handles delivery | Yes | No — peers sync directly |
+| Works without internet (LAN) | No | Yes — multicast discovery |
+| Operator can correlate contacts | Yes (metadata) | No — DHT infohash reveals no key |
+| Library you can embed | No | Yes |
+
+**Over federated systems (Matrix, XMPP):**
+
+- No homeserver to deploy, maintain, or trust.
+- No DNS records, TLS certificates, or open ports required.
+- Peers behind NAT are reached automatically — UPnP is tried first; TCP hole punching is the fallback.
+
+**Over file-based or git-based messaging:**
+
+- Content is encrypted at rest. Every line in `messages.db` is AES-256-CBC ciphertext authenticated with HMAC-SHA256. A filesystem-level attacker learns nothing.
+- Message order is agreed upon deterministically by all readers without timestamps, a coordinator, or a consensus protocol.
+
+**Over ad-hoc socket protocols:**
+
+- Peers are discovered automatically. You do not need to know your peer's IP address in advance — the DHT finds them anywhere on the internet, using the shared secret as the only rendezvous point.
+- Sync is pull-based and idempotent. Partial syncs, retries, and concurrent writers are all handled correctly.
+
+### Limitations and Trade-offs
+
+- **Key exchange is out-of-band.** The library does not solve the initial secret-sharing problem. `user_key` and `secret_id` must be transmitted through a separate trusted channel before communication begins.
+- **Turn-based, not real-time.** The protocol alternates sides; a responder cannot send until the initiator has written at least one message. This is a deliberate property of the chain structure, not a bug — it prevents both sides from advancing the chain simultaneously.
+- **No relay for symmetric NAT or CGNAT.** Peers behind carrier-grade NAT that block simultaneous TCP opens will not connect. Adding a relay is an application-level concern.
+- **Single shared key per side.** All participants on the same side (initiator or responder) share the same AES/HMAC keys. This is suitable for small groups where all members are mutually trusted. It is not a forward-secret or per-member-encrypted design.
 
 ---
 
