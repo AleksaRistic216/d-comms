@@ -1,6 +1,10 @@
 #ifndef SHA256_H
 #define SHA256_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -21,5 +25,9 @@ void sha256(const uint8_t *data, size_t len, uint8_t hash[32]);
 void hmac_sha256(const uint8_t *key, size_t key_len,
                  const uint8_t *data, size_t data_len,
                  uint8_t out[32]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

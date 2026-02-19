@@ -1,6 +1,10 @@
 #ifndef PROTO_H
 #define PROTO_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <time.h>
 #include <sys/types.h>
@@ -49,5 +53,9 @@ int proto_load_chat(proto_chat *chat, const char *name, const char *basedir);
 void proto_db_rdlock(void);
 void proto_db_wrlock(void);
 void proto_db_unlock(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -1,6 +1,10 @@
 #ifndef AES_H
 #define AES_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -33,5 +37,9 @@ uint8_t *aes_cbc_encrypt(const uint8_t key[AES_KEY_SIZE],
 uint8_t *aes_cbc_decrypt(const uint8_t key[AES_KEY_SIZE],
                           const uint8_t *data, size_t data_len,
                           size_t *out_len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

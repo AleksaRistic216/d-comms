@@ -1,6 +1,10 @@
 #ifndef SYNC_H
 #define SYNC_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Start background TCP sync server. Returns listening port, or -1 on error. */
 int sync_start_server(void);
 
@@ -12,5 +16,9 @@ void sync_unregister(void);
 
 /* Pull messages.db from all registered peers, merge new lines. Returns count added. */
 int sync_with_peers(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
