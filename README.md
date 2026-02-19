@@ -5,55 +5,6 @@ No server. No network daemon. Peers discover each other automatically — on the
 
 ---
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Why d-comms](#why-d-comms)
-  - [Purpose](#purpose)
-  - [Advantages](#advantages)
-  - [Limitations and Trade-offs](#limitations-and-trade-offs)
-- [Architecture](#architecture)
-- [The Protocol](#the-protocol)
-  - [Key Derivation](#key-derivation)
-  - [The Chain Structure](#the-chain-structure)
-  - [Message Format](#message-format)
-  - [Turn System](#turn-system)
-  - [Message Ordering](#message-ordering)
-- [The Database](#the-database)
-- [Peer Discovery and Sync](#peer-discovery-and-sync)
-  - [LAN — Multicast](#lan--multicast)
-  - [Internet — Mainline DHT](#internet--mainline-dht)
-  - [NAT Traversal — UPnP and Hole Punching](#nat-traversal--upnp-and-hole-punching)
-  - [Sync Protocol](#sync-protocol)
-- [Security Model](#security-model)
-- [Using the Library](#using-the-library)
-  - [Build](#build)
-  - [API Reference](#api-reference)
-  - [Integration Example](#integration-example)
-- [File Reference](#file-reference)
-- [Limits and Constants](#limits-and-constants)
-
----
-
-## Overview
-
-d-comms implements an **encrypted, turn-based chat** on top of a plain append-only text file (`messages.db`). The entire "network" is that flat file — propagated across peers by a TCP sync layer that is fed peer addresses from two automatic discovery mechanisms.
-
-The protocol has two **sides** (initiator and responder), not two hard-coded participants. Multiple peers can share the responder side by all calling `proto_join` with the same credentials; their messages appear together in the same group, each identified by a unique per-session `entity_id`. The initiator side supports the same pattern.
-
-**Key properties:**
-
-- Encryption-at-rest: all content in `messages.db` is AES-256-CBC encrypted
-- Authentication: every ciphertext is protected by HMAC-SHA256
-- Anonymity: participants are identified only by random 8-byte entity IDs
-- No central authority: the shared secret is exchanged out-of-band
-- LAN discovery: multicast UDP (239.255.77.77:55777) finds peers on the same network automatically
-- Internet discovery: Mainline DHT finds peers anywhere on the internet using the shared `user_key` as a rendezvous point — no server required
-- NAT traversal: UPnP port mapping (attempted automatically) and TCP hole punching (fallback)
-- Deterministic ordering: message order is agreed upon by all readers without timestamps
-
----
-
 ## Why d-comms
 
 Most encrypted messaging systems solve the privacy problem by trusting a smaller set of servers. d-comms removes the server entirely.
@@ -101,6 +52,51 @@ d-comms is designed for situations where you want private communication without 
 - **Turn-based, not real-time.** The protocol alternates sides; a responder cannot send until the initiator has written at least one message. This is a deliberate property of the chain structure, not a bug — it prevents both sides from advancing the chain simultaneously.
 - **No relay for symmetric NAT or CGNAT.** Peers behind carrier-grade NAT that block simultaneous TCP opens will not connect. Adding a relay is an application-level concern.
 - **Single shared key per side.** All participants on the same side (initiator or responder) share the same AES/HMAC keys. This is suitable for small groups where all members are mutually trusted. It is not a forward-secret or per-member-encrypted design.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [The Protocol](#the-protocol)
+  - [Key Derivation](#key-derivation)
+  - [The Chain Structure](#the-chain-structure)
+  - [Message Format](#message-format)
+  - [Turn System](#turn-system)
+  - [Message Ordering](#message-ordering)
+- [The Database](#the-database)
+- [Peer Discovery and Sync](#peer-discovery-and-sync)
+  - [LAN — Multicast](#lan--multicast)
+  - [Internet — Mainline DHT](#internet--mainline-dht)
+  - [NAT Traversal — UPnP and Hole Punching](#nat-traversal--upnp-and-hole-punching)
+  - [Sync Protocol](#sync-protocol)
+- [Security Model](#security-model)
+- [Using the Library](#using-the-library)
+  - [Build](#build)
+  - [API Reference](#api-reference)
+  - [Integration Example](#integration-example)
+- [File Reference](#file-reference)
+- [Limits and Constants](#limits-and-constants)
+
+---
+
+## Overview
+
+d-comms implements an **encrypted, turn-based chat** on top of a plain append-only text file (`messages.db`). The entire "network" is that flat file — propagated across peers by a TCP sync layer that is fed peer addresses from two automatic discovery mechanisms.
+
+The protocol organizes participants into two **turn groups**: the initiator group and the responder group. Any number of peers can join either group — everyone who calls `proto_initialize` shares the initiator group, and everyone who calls `proto_join` with the same credentials shares the responder group. Within a group, each participant is identified by a unique random `entity_id`; their messages all appear in the same turn slot and are ordered deterministically.
+
+**Key properties:**
+
+- Encryption-at-rest: all content in `messages.db` is AES-256-CBC encrypted
+- Authentication: every ciphertext is protected by HMAC-SHA256
+- Anonymity: participants are identified only by random 8-byte entity IDs
+- No central authority: the shared secret is exchanged out-of-band
+- LAN discovery: multicast UDP (239.255.77.77:55777) finds peers on the same network automatically
+- Internet discovery: Mainline DHT finds peers anywhere on the internet using the shared `user_key` as a rendezvous point — no server required
+- NAT traversal: UPnP port mapping (attempted automatically) and TCP hole punching (fallback)
+- Deterministic ordering: message order is agreed upon by all readers without timestamps
 
 ---
 
@@ -251,7 +247,7 @@ The entity ID is a random 8-byte identifier generated locally per chat session. 
 
 ### Turn System
 
-The protocol enforces **alternating turns** between initiator and responder:
+The protocol enforces **alternating turns** between the two groups. All members of a group may write during their group's turn:
 
 ```
  Group 0   Group 1   Group 2   Group 3   Group 4   …
@@ -260,7 +256,15 @@ The protocol enforces **alternating turns** between initiator and responder:
   can send  can send  can send  can send  can send
 ```
 
-State machine for `proto_chat.state`:
+#### Why alternation is necessary
+
+The FID written into each group is what creates the next group's prefix — it is the only way the chain can advance. This means whoever writes the FID for a given prefix slot decides where the chain goes next.
+
+Without alternation, both groups could write FIDs into the same prefix slot concurrently. The tiebreaker (smallest encrypted hex wins) can resolve a race between multiple members *within* the same group writing a FID, because all of them are on the same side and the winner is still that group's FID. But if members from *different* groups both write FIDs into the same slot, the tiebreaker has no way to determine which group should own the next prefix — the chain's ownership sequence would become ambiguous and diverge across readers.
+
+Alternation solves this structurally: each prefix slot is exclusively owned by one group (even-numbered slots belong to the initiator group, odd-numbered to the responder group). Only the owning group writes the FID that advances the chain out of their slot. The other group can only listen on that prefix, waiting for the FID to appear. Because of this, every reader independently agrees on which group owns every group number, without any coordination beyond the shared secret.
+
+#### State machine
 
 ```
   state = 0 (uninit)
@@ -272,7 +276,7 @@ State machine for `proto_chat.state`:
                                          ──► state = 2 if not yet (no FID seen)
 ```
 
-A client in state `2` cannot send until it has walked the chain and confirmed its turn has started. This prevents both sides writing FIDs into the same group simultaneously — if two FIDs land in the same group, the protocol picks the **lexicographically smallest encrypted hex string** as the canonical FID, so all readers agree.
+A client in state `2` cannot send until it has walked the chain and confirmed its turn has started. Within a group, multiple members may race to write the FID; the protocol picks the **lexicographically smallest encrypted hex string** as the canonical FID, so all readers agree on the same winner.
 
 ---
 
