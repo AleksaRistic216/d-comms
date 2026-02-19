@@ -25,21 +25,24 @@ jobs:
 
       - name: Pack release
         run: |
+          VERSION="1.0.${{ github.run_number }}"
           mkdir -p release/include
           cp build/libdcomms_core.a release/
           cp src/*.h release/include/
-          tar -czf libdcomms_core.tar.gz -C release .
+          tar -czf libdcomms_core-${VERSION}.tar.gz -C release .
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "TARBALL=libdcomms_core-${VERSION}.tar.gz" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libdcomms_core
-          path: libdcomms_core.tar.gz
+          name: libdcomms_core-${{ env.VERSION }}
+          path: ${{ env.TARBALL }}
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest
-          files: libdcomms_core.tar.gz
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          files: ${{ env.TARBALL }}
           make_latest: true
