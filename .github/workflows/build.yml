@@ -16,11 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up MinGW
+      - name: Add MSYS2 MinGW to PATH
         if: runner.os == 'Windows'
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
+        run: echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
 
       - name: Configure (Linux / macOS)
         if: runner.os != 'Windows'
@@ -28,7 +26,7 @@ jobs:
 
       - name: Configure (Windows / MinGW)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc
 
       - name: Build
         run: cmake --build build --parallel
