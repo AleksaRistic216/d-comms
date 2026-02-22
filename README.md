@@ -3,6 +3,8 @@
 A minimal, encrypted, decentralized messaging library written in C99.
 No server. No network daemon. Peers discover each other automatically — on the same LAN via multicast and across the internet via the BitTorrent Mainline DHT.
 
+Builds on **Linux**, **macOS**, and **Windows** (MinGW and MSVC).
+
 ---
 
 ## Why d-comms
@@ -16,6 +18,7 @@ d-comms is designed for situations where you want private communication without 
 - **No account, no registration.** A chat session is created by exchanging two hex strings (32 chars each) through any channel you already trust — a QR code, a voice call, a shared note.
 - **No server to run or trust.** Peers find each other directly: on the same LAN via multicast UDP, across the internet via the BitTorrent Mainline DHT network, and through NAT via UPnP or TCP hole punching.
 - **Embeddable.** d-comms is a plain C99 static library with no runtime dependencies beyond pthreads. It links into any application — a TUI, a GUI, a daemon, or firmware.
+- **Cross-platform.** Builds and runs on Linux, macOS, and Windows (MinGW + MSVC). A thin `compat.h`/`compat.c` portability layer abstracts over socket APIs, file locking, random-byte generation, and filesystem differences.
 
 ### Advantages
 
@@ -130,6 +133,7 @@ The protocol organizes participants into two **turn groups**: Group A and Group 
 | Sync layer | `sync.c`, `sync.h` | TCP server, registry, LAN multicast discovery, peer merge, UPnP, hole punching |
 | DHT client | `dht_client.c`, `dht_client.h` | Mainline DHT thread, peer announce/search, bootstrap |
 | UPnP client | `upnp.c`, `upnp.h` | SSDP discovery, port mapping, external IP resolution |
+| Portability layer | `compat.c`, `compat.h` | Cross-platform socket I/O, file locking, random bytes, WSA init/cleanup |
 | AES-256 | `aes.c`, `aes.h` | Block cipher, CBC mode, PKCS7 padding |
 | SHA-256 / HMAC | `sha256.c`, `sha256.h` | Hashing and message authentication |
 
@@ -302,7 +306,7 @@ Since the IV is sampled from `/dev/urandom` at write time, no sender can influen
  …
 ```
 
-**Locking:** writes use `pthread_rwlock_t` (intra-process) combined with `flock(LOCK_EX/LOCK_SH)` (inter-process). Readers take shared locks; writers take exclusive locks.
+**Locking:** writes use `pthread_rwlock_t` (intra-process) combined with `dcomms_flock` (`flock` on POSIX, `LockFileEx` on Windows) for inter-process mutual exclusion. Readers take shared locks; writers take exclusive locks.
 
 **Merging:** the sync layer only appends lines not already present (deduplication via hash set). The file grows monotonically — no compaction or deletion.
 
@@ -394,24 +398,51 @@ Clients connecting to a peer receive both the message lines (appended to local `
 
 ### Build
 
+jech/dht is fetched automatically by CMake via FetchContent on first configure (requires internet access).
+
+**Linux / macOS**
+
 ```sh
 cmake -S . -B build
 cmake --build build
+# Produces: build/libdcomms_core.a
 ```
 
-This produces `build/libdcomms_core.a`. jech/dht is fetched automatically by CMake via FetchContent (requires internet access on first configure). Link with `-lpthread`:
+Link with `-lpthread`:
 
 ```sh
 gcc myapp.c -I/path/to/d-comms/src -L/path/to/d-comms/build \
     -ldcomms_core -lpthread -o myapp
 ```
 
-Or as a CMake subdirectory:
+**Windows — MinGW**
+
+```sh
+cmake -S . -B build-win -G "MinGW Makefiles"
+cmake --build build-win
+# Produces: build-win/libdcomms_core.a
+```
+
+Link with `-lws2_32 -lbcrypt -lpthread`.
+
+**Windows — MSVC**
+
+```sh
+cmake -S . -B build-msvc -G "Visual Studio 17 2022"
+cmake --build build-msvc --config Release
+# Produces: build-msvc/Release/dcomms_core.lib
+```
+
+pthreads4w is fetched automatically under MSVC. Link with `ws2_32.lib bcrypt.lib pthreads4w.lib`.
+
+**As a CMake subdirectory (all platforms)**
 
 ```cmake
 add_subdirectory(d-comms)
 target_link_libraries(myapp PRIVATE dcomms_core)
 ```
+
+Platform-specific link flags (`ws2_32`, `bcrypt`, `pthreads4w`) are attached to `dcomms_core` as `PUBLIC` dependencies and propagate automatically.
 
 ---
 
@@ -510,7 +541,9 @@ typedef struct {
 
 ```c
 #include <stdio.h>
-#include <unistd.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 #include "proto.h"
 #include "sync.h"
 #include "dht_client.h"
