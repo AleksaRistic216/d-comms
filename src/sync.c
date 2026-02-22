@@ -1,17 +1,6 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <time.h>
-#include <errno.h>
-#include <fcntl.h>
+#include "compat.h"
+
 #include <pthread.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <sys/file.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 
 #include "sync.h"
 #include "upnp.h"
@@ -33,7 +22,7 @@
 #define DISCOVERY_TTL      1
 #define DISCOVERY_INTERVAL 5  /* seconds between announcements */
 
-static int       g_server_fd   = -1;
+static dcomms_socket_t g_server_fd = DCOMMS_INVALID_SOCKET;
 static pthread_t g_server_tid;
 static volatile int g_server_quit;
 static char g_my_host[64];
@@ -124,16 +113,13 @@ static int connect_to_peer(const char *host, int port)
         sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (sfd < 0) continue;
 
-        struct timeval tv;
-        tv.tv_sec  = SYNC_TIMEOUT;
-        tv.tv_usec = 0;
-        setsockopt(sfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(sfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        dcomms_set_socktimeo(sfd, SO_RCVTIMEO, SYNC_TIMEOUT);
+        dcomms_set_socktimeo(sfd, SO_SNDTIMEO, SYNC_TIMEOUT);
 
         if (connect(sfd, rp->ai_addr, rp->ai_addrlen) == 0)
             break;
 
-        close(sfd);
+        sock_close(sfd);
         sfd = -1;
     }
     freeaddrinfo(res);
@@ -169,9 +155,9 @@ static int connect_to_peer_hp(const char *host, int port)
         if (sfd < 0) continue;
 
         int opt = 1;
-        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, SOCKOPT_VAL(&opt), sizeof(opt));
 #ifdef SO_REUSEPORT
-        setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+        setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, SOCKOPT_VAL(&opt), sizeof(opt));
 #endif
 
         /* Bind to our server port so our SYN's source port is predictable */
@@ -181,21 +167,20 @@ static int connect_to_peer_hp(const char *host, int port)
         local.sin_addr.s_addr = htonl(INADDR_ANY);
         local.sin_port        = htons((uint16_t)g_local_port);
         if (bind(sfd, (struct sockaddr *)&local, sizeof(local)) < 0) {
-            close(sfd); sfd = -1; continue;
+            sock_close(sfd); sfd = -1; continue;
         }
 
         /* Non-blocking connect so we can wait with select */
-        int flags = fcntl(sfd, F_GETFL, 0);
-        fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
+        dcomms_set_nonblocking(sfd, 1);
 
         int rc = connect(sfd, rp->ai_addr, rp->ai_addrlen);
         if (rc == 0) {
             /* Immediate success (e.g. loopback) */
-            fcntl(sfd, F_SETFL, flags);
+            dcomms_set_blocking(sfd);
             break;
         }
-        if (errno != EINPROGRESS) {
-            close(sfd); sfd = -1; continue;
+        if (SOCK_ERRNO != SOCK_EINPROGRESS) {
+            sock_close(sfd); sfd = -1; continue;
         }
 
         /* Wait up to 1 s for the connection to complete */
@@ -209,11 +194,11 @@ static int connect_to_peer_hp(const char *host, int port)
             socklen_t elen = sizeof(err);
             getsockopt(sfd, SOL_SOCKET, SO_ERROR, &err, &elen);
             if (err == 0) {
-                fcntl(sfd, F_SETFL, flags);
+                dcomms_set_blocking(sfd);
                 break;
             }
         }
-        close(sfd); sfd = -1;
+        sock_close(sfd); sfd = -1;
     }
     freeaddrinfo(res);
     return sfd;
@@ -232,9 +217,9 @@ static void *discovery_thread(void *arg)
 
     /* Allow multiple instances on the same machine to share the port */
     int opt = 1;
-    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, SOCKOPT_VAL(&opt), sizeof(opt));
 #ifdef SO_REUSEPORT
-    setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, SOCKOPT_VAL(&opt), sizeof(opt));
 #endif
 
     struct sockaddr_in bind_addr;
@@ -243,7 +228,7 @@ static void *discovery_thread(void *arg)
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     bind_addr.sin_port        = htons(DISCOVERY_PORT);
     if (bind(sfd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-        close(sfd);
+        sock_close(sfd);
         return NULL;
     }
 
@@ -251,14 +236,14 @@ static void *discovery_thread(void *arg)
     struct ip_mreq mreq;
     inet_pton(AF_INET, DISCOVERY_GROUP, &mreq.imr_multiaddr);
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(sfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+    setsockopt(sfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, SOCKOPT_VAL(&mreq), sizeof(mreq));
 
     /* Outgoing multicast: link-local TTL, loop back to self so same-machine
        instances see each other's announcements */
     unsigned char ttl  = DISCOVERY_TTL;
     unsigned char loop = 1;
-    setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_TTL,  &ttl,  sizeof(ttl));
-    setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+    setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_TTL,  SOCKOPT_VAL(&ttl),  sizeof(ttl));
+    setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_LOOP, SOCKOPT_VAL(&loop), sizeof(loop));
 
     struct sockaddr_in mcast_addr;
     memset(&mcast_addr, 0, sizeof(mcast_addr));
@@ -301,8 +286,8 @@ static void *discovery_thread(void *arg)
         }
     }
 
-    setsockopt(sfd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
-    close(sfd);
+    setsockopt(sfd, IPPROTO_IP, IP_DROP_MEMBERSHIP, SOCKOPT_VAL(&mreq), sizeof(mreq));
+    sock_close(sfd);
     return NULL;
 }
 
@@ -312,7 +297,7 @@ static void send_all(int fd, const char *buf, size_t len)
 {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = write(fd, buf + sent, len - sent);
+        ssize_t n = sock_send(fd, buf + sent, len - sent);
         if (n <= 0) return;
         sent += (size_t)n;
     }
@@ -329,20 +314,17 @@ static void *server_thread(void *arg)
         int cfd = accept(g_server_fd, (struct sockaddr *)&ca, &ca_len);
         if (cfd < 0) break;
 
-        struct timeval tv;
-        tv.tv_sec  = 2;
-        tv.tv_usec = 0;
-        setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        dcomms_set_socktimeo(cfd, SO_SNDTIMEO, 2);
 
         /* Send messages.db */
         proto_db_rdlock();
         FILE *db = fopen(DB_FILE, "r");
         if (db) {
-            flock(fileno(db), LOCK_SH);
+            dcomms_flock(fileno(db), LOCK_SH);
             char line[MAX_LINE];
             while (fgets(line, sizeof(line), db))
                 send_all(cfd, line, strlen(line));
-            flock(fileno(db), LOCK_UN);
+            dcomms_flock(fileno(db), LOCK_UN);
             fclose(db);
         }
         proto_db_unlock();
@@ -353,18 +335,18 @@ static void *server_thread(void *arg)
         /* Gossip all known registry entries to the connecting peer */
         FILE *rf = fopen(REGISTRY_FILE, "r");
         if (rf) {
-            flock(fileno(rf), LOCK_SH);
+            dcomms_flock(fileno(rf), LOCK_SH);
             char line[128];
             while (fgets(line, sizeof(line), rf)) {
                 char h[64]; int port;
                 if (sscanf(line, "%63[^:]:%d", h, &port) == 2)
                     send_all(cfd, line, strlen(line));
             }
-            flock(fileno(rf), LOCK_UN);
+            dcomms_flock(fileno(rf), LOCK_UN);
             fclose(rf);
         }
 
-        close(cfd);
+        sock_close(cfd);
     }
     return NULL;
 }
@@ -373,13 +355,15 @@ int sync_start_server(void)
 {
     g_server_quit = 0;
 
+    dcomms_wsa_init();
+
     g_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_server_fd < 0) return -1;
+    if (g_server_fd == DCOMMS_INVALID_SOCKET) return -1;
 
     int opt = 1;
-    setsockopt(g_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(g_server_fd, SOL_SOCKET, SO_REUSEADDR, SOCKOPT_VAL(&opt), sizeof(opt));
 #ifdef SO_REUSEPORT
-    setsockopt(g_server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    setsockopt(g_server_fd, SOL_SOCKET, SO_REUSEPORT, SOCKOPT_VAL(&opt), sizeof(opt));
 #endif
 
     struct sockaddr_in addr;
@@ -389,8 +373,8 @@ int sync_start_server(void)
     addr.sin_port        = 0;
 
     if (bind(g_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(g_server_fd);
-        g_server_fd = -1;
+        sock_close(g_server_fd);
+        g_server_fd = DCOMMS_INVALID_SOCKET;
         return -1;
     }
 
@@ -399,14 +383,14 @@ int sync_start_server(void)
     g_local_port = (int)ntohs(addr.sin_port);
 
     if (listen(g_server_fd, 4) < 0) {
-        close(g_server_fd);
-        g_server_fd = -1;
+        sock_close(g_server_fd);
+        g_server_fd = DCOMMS_INVALID_SOCKET;
         return -1;
     }
 
     if (pthread_create(&g_server_tid, NULL, server_thread, NULL) != 0) {
-        close(g_server_fd);
-        g_server_fd = -1;
+        sock_close(g_server_fd);
+        g_server_fd = DCOMMS_INVALID_SOCKET;
         return -1;
     }
 
@@ -434,7 +418,7 @@ void sync_register(int port)
 
     FILE *f = fopen(REGISTRY_FILE, "a+");
     if (!f) return;
-    flock(fileno(f), LOCK_EX);
+    dcomms_flock(fileno(f), LOCK_EX);
     rewind(f);
 
     /* Keep existing entries, dropping any stale duplicate of our own address */
@@ -452,7 +436,7 @@ void sync_register(int port)
     }
 
     if (ftruncate(fileno(f), 0) != 0) {
-        flock(fileno(f), LOCK_UN);
+        dcomms_flock(fileno(f), LOCK_UN);
         fclose(f);
         return;
     }
@@ -462,7 +446,7 @@ void sync_register(int port)
     fprintf(f, "%s:%d\n", g_my_host, g_my_port);
     fflush(f);
 
-    flock(fileno(f), LOCK_UN);
+    dcomms_flock(fileno(f), LOCK_UN);
     fclose(f);
 
     /* Start the discovery thread now that g_my_host/g_my_port are set */
@@ -478,7 +462,7 @@ void sync_unregister(void)
 
     FILE *f = fopen(REGISTRY_FILE, "r+");
     if (!f) goto shutdown_server;
-    flock(fileno(f), LOCK_EX);
+    dcomms_flock(fileno(f), LOCK_EX);
 
     char keep[64][128];
     int count = 0;
@@ -499,28 +483,29 @@ void sync_unregister(void)
         fputs(keep[i], f);
     fflush(f);
 
-    flock(fileno(f), LOCK_UN);
+    dcomms_flock(fileno(f), LOCK_UN);
     fclose(f);
 
 shutdown_server:
     g_server_quit = 1;
-    if (g_server_fd >= 0) {
+    if (g_server_fd != DCOMMS_INVALID_SOCKET) {
         shutdown(g_server_fd, SHUT_RDWR);
-        close(g_server_fd);
-        g_server_fd = -1;
+        sock_close(g_server_fd);
+        g_server_fd = DCOMMS_INVALID_SOCKET;
     }
     pthread_join(g_server_tid, NULL);
     if (g_disc_started) {
         pthread_join(g_disc_tid, NULL);
         g_disc_started = 0;
     }
+    dcomms_wsa_cleanup();
 }
 
 void sync_add_peer(const char *host, int port)
 {
     FILE *f = fopen(REGISTRY_FILE, "a+");
     if (!f) return;
-    flock(fileno(f), LOCK_EX);
+    dcomms_flock(fileno(f), LOCK_EX);
     rewind(f);
 
     /* Skip if already present */
@@ -529,7 +514,7 @@ void sync_add_peer(const char *host, int port)
         char h[64]; int p;
         if (sscanf(line, "%63[^:]:%d", h, &p) == 2 &&
             strcmp(h, host) == 0 && p == port) {
-            flock(fileno(f), LOCK_UN);
+            dcomms_flock(fileno(f), LOCK_UN);
             fclose(f);
             return;
         }
@@ -539,7 +524,7 @@ void sync_add_peer(const char *host, int port)
     fprintf(f, "%s:%d\n", host, port);
     fflush(f);
 
-    flock(fileno(f), LOCK_UN);
+    dcomms_flock(fileno(f), LOCK_UN);
     fclose(f);
 }
 
@@ -553,7 +538,7 @@ int sync_with_peers(void)
 
     FILE *rf = fopen(REGISTRY_FILE, "r");
     if (rf) {
-        flock(fileno(rf), LOCK_SH);
+        dcomms_flock(fileno(rf), LOCK_SH);
         char line[128];
         while (fgets(line, sizeof(line), rf) && peer_count < 64) {
             char h[64]; int port;
@@ -565,7 +550,7 @@ int sync_with_peers(void)
                 peer_count++;
             }
         }
-        flock(fileno(rf), LOCK_UN);
+        dcomms_flock(fileno(rf), LOCK_UN);
         fclose(rf);
     }
 
@@ -578,14 +563,14 @@ int sync_with_peers(void)
     proto_db_rdlock();
     FILE *lf = fopen(DB_FILE, "r");
     if (lf) {
-        flock(fileno(lf), LOCK_SH);
+        dcomms_flock(fileno(lf), LOCK_SH);
         char lline[MAX_LINE];
         while (fgets(lline, sizeof(lline), lf)) {
             int len = (int)strlen(lline);
             if (len > 0 && lline[len - 1] == '\n') lline[--len] = '\0';
             if (len > 0) hs_add(&msg_hs, lline);
         }
-        flock(fileno(lf), LOCK_UN);
+        dcomms_flock(fileno(lf), LOCK_UN);
         fclose(lf);
     }
     proto_db_unlock();
@@ -596,14 +581,14 @@ int sync_with_peers(void)
     {
         FILE *rrf = fopen(REGISTRY_FILE, "r");
         if (rrf) {
-            flock(fileno(rrf), LOCK_SH);
+            dcomms_flock(fileno(rrf), LOCK_SH);
             char line[128];
             while (fgets(line, sizeof(line), rrf)) {
                 int len = (int)strlen(line);
                 if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
                 if (len > 0) hs_add(&reg_hs, line);
             }
-            flock(fileno(rrf), LOCK_UN);
+            dcomms_flock(fileno(rrf), LOCK_UN);
             fclose(rrf);
         }
     }
@@ -615,7 +600,7 @@ int sync_with_peers(void)
         if (sfd < 0) continue;
 
         FILE *sf = fdopen(sfd, "r");
-        if (!sf) { close(sfd); continue; }
+        if (!sf) { sock_close(sfd); continue; }
 
         /* Collect new message lines and registry entries from this peer */
         int msg_cap = 256;
@@ -670,11 +655,11 @@ int sync_with_peers(void)
             proto_db_wrlock();
             FILE *db = fopen(DB_FILE, "a");
             if (db) {
-                flock(fileno(db), LOCK_EX);
+                dcomms_flock(fileno(db), LOCK_EX);
                 for (int i = 0; i < msg_count; i++)
                     fprintf(db, "%s\n", msg_batch[i]);
                 fflush(db);
-                flock(fileno(db), LOCK_UN);
+                dcomms_flock(fileno(db), LOCK_UN);
                 fclose(db);
             }
             proto_db_unlock();
@@ -687,11 +672,11 @@ int sync_with_peers(void)
         if (reg_count > 0) {
             FILE *rw = fopen(REGISTRY_FILE, "a");
             if (rw) {
-                flock(fileno(rw), LOCK_EX);
+                dcomms_flock(fileno(rw), LOCK_EX);
                 for (int i = 0; i < reg_count; i++)
                     fprintf(rw, "%s\n", reg_batch[i]);
                 fflush(rw);
-                flock(fileno(rw), LOCK_UN);
+                dcomms_flock(fileno(rw), LOCK_UN);
                 fclose(rw);
             }
         }

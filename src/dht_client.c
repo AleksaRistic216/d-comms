@@ -1,19 +1,7 @@
-/* System headers must come before dht.h (which omits its own prerequisites) */
-#include <stdio.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
-#include <time.h>
-#include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
+/* compat.h must come before dht.h (which omits its own prerequisites) */
+#include "compat.h"
+
 #include <pthread.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 
 #include "dht.h"
 #include "dht_client.h"
@@ -32,7 +20,7 @@
 
 static pthread_t        g_dht_thread;
 static volatile int     g_dht_running = 0;
-static int              g_dht_fd      = -1;
+static dcomms_socket_t  g_dht_fd      = DCOMMS_INVALID_SOCKET;
 static int              g_sync_port   = 0;
 static char             g_basedir[256];
 
@@ -83,17 +71,14 @@ void dht_hash(void *hash_return, int hash_size,
 
 int dht_random_bytes(void *buf, size_t size)
 {
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) return -1;
-    ssize_t n = read(fd, buf, size);
-    close(fd);
-    return (n == (ssize_t)size) ? 0 : -1;
+    return dcomms_random_bytes(buf, size);
 }
 
 int dht_sendto(int sockfd, const void *buf, int len, int flags,
                const struct sockaddr *to, int tolen)
 {
-    return (int)sendto(sockfd, buf, (size_t)len, flags, to, (socklen_t)tolen);
+    return (int)sendto((dcomms_socket_t)sockfd, (const char *)buf,
+                       (size_t)len, flags, to, (socklen_t)tolen);
 }
 
 /* ---- DHT event callback ---- */
@@ -213,7 +198,7 @@ static void *dht_thread_fn(void *arg)
 
     /* Create UDP socket */
     g_dht_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (g_dht_fd < 0) return NULL;
+    if (g_dht_fd == DCOMMS_INVALID_SOCKET) return NULL;
 
     struct sockaddr_in sin;
     memset(&sin, 0, sizeof(sin));
@@ -278,8 +263,10 @@ static void *dht_thread_fn(void *arg)
     }
 
     dht_uninit();
-    close(g_dht_fd);
-    g_dht_fd = -1;
+    if (g_dht_fd != DCOMMS_INVALID_SOCKET) {
+        sock_close(g_dht_fd);
+        g_dht_fd = DCOMMS_INVALID_SOCKET;
+    }
     return NULL;
 }
 

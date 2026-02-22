@@ -7,7 +7,11 @@ extern "C" {
 
 #include <stdint.h>
 #include <time.h>
-#include <sys/types.h>
+#ifdef _WIN32
+  typedef long long off_t;
+#else
+#  include <sys/types.h>
+#endif
 
 #define ID_BYTES     16
 #define MAX_LINE     8192

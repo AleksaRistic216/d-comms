@@ -1,11 +1,6 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include "compat.h"
+
 #include <pthread.h>
-#include <sys/file.h>
-#include <sys/stat.h>
 
 #include "proto.h"
 #include "sha256.h"
@@ -25,15 +20,12 @@ void proto_db_unlock(void) { pthread_rwlock_unlock(&g_db_lock); }
 
 static int gen_hex(char *buf, int bytes)
 {
-    FILE *f = fopen("/dev/urandom", "rb");
-    if (!f) return -1;
-    for (int i = 0; i < bytes; i++) {
-        unsigned char c;
-        if (fread(&c, 1, 1, f) != 1) { fclose(f); return -1; }
-        sprintf(buf + i * 2, "%02x", c);
-    }
+    unsigned char tmp[32];
+    if (bytes > (int)sizeof(tmp)) return -1;
+    if (dcomms_random_bytes(tmp, (size_t)bytes) != 0) return -1;
+    for (int i = 0; i < bytes; i++)
+        sprintf(buf + i * 2, "%02x", tmp[i]);
     buf[bytes * 2] = '\0';
-    fclose(f);
     return 0;
 }
 
@@ -157,10 +149,10 @@ static void db_append(const char *prefix, const char *hex_data)
     proto_db_wrlock();
     FILE *f = fopen(DB_FILE, "a");
     if (!f) { proto_db_unlock(); return; }
-    flock(fileno(f), LOCK_EX);
+    dcomms_flock(fileno(f), LOCK_EX);
     fprintf(f, "%s.%s\n", prefix, hex_data);
     fflush(f);
-    flock(fileno(f), LOCK_UN);
+    dcomms_flock(fileno(f), LOCK_UN);
     fclose(f);
     proto_db_unlock();
 }
@@ -170,11 +162,11 @@ static int db_read(const char *prefix, char ***out)
     proto_db_rdlock();
     FILE *f = fopen(DB_FILE, "r");
     if (!f) { *out = NULL; proto_db_unlock(); return 0; }
-    flock(fileno(f), LOCK_SH);
+    dcomms_flock(fileno(f), LOCK_SH);
 
     int cap = 16, count = 0;
     char **res = malloc(sizeof(char *) * (size_t)cap);
-    if (!res) { flock(fileno(f), LOCK_UN); fclose(f); proto_db_unlock(); *out = NULL; return 0; }
+    if (!res) { dcomms_flock(fileno(f), LOCK_UN); fclose(f); proto_db_unlock(); *out = NULL; return 0; }
 
     char line[MAX_LINE];
     int plen = (int)strlen(prefix);
@@ -193,7 +185,7 @@ static int db_read(const char *prefix, char ***out)
         }
     }
 
-    flock(fileno(f), LOCK_UN);
+    dcomms_flock(fileno(f), LOCK_UN);
     fclose(f);
     proto_db_unlock();
     *out = res;
@@ -539,12 +531,12 @@ int proto_save_chat(const proto_chat *chat, const char *name, const char *basedi
 {
     char dir[512];
     snprintf(dir, sizeof(dir), "%s/chats", basedir);
-    mkdir(dir, 0700);
+    dcomms_mkdir(dir, 0700);
 
     char path[512];
     snprintf(path, sizeof(path), "%s/chats/%s.chat", basedir, name);
 
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = dcomms_open_private(path);
     if (fd < 0) return -1;
     FILE *f = fdopen(fd, "w");
     if (!f) { close(fd); return -1; }

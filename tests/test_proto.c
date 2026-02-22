@@ -5,10 +5,14 @@
  * creates a fresh temporary directory and chdir()s into it, then cleans up.
  */
 
+#include "test_compat.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 #include <sys/stat.h>
 
 #include "proto.h"
@@ -61,7 +65,7 @@ static int count_db_lines(void)
 /* Create a temp dir, chdir into it. Returns 0 on success, -1 on failure. */
 static int setup(char *tmpdir /* caller supplies char[64] */)
 {
-    strcpy(tmpdir, "/tmp/dcomms_ptest_XXXXXX");
+    strcpy(tmpdir, DCOMMS_TEST_TMPDIR);
     if (!mkdtemp(tmpdir)) return -1;
     return chdir(tmpdir);
 }

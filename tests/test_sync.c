@@ -5,12 +5,16 @@
  * own CWD (and therefore their own messages.db) and their own server state.
  */
 
+#include "test_compat.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#  include <sys/wait.h>
+#endif
 #include <sys/stat.h>
-#include <sys/wait.h>
 
 #include "sync.h"
 #include "proto.h"
@@ -106,6 +110,7 @@ static void test_register_and_unregister(void)
     rmdir(tmpdir);
 }
 
+#ifndef _WIN32
 /*
  * Fork-based pull test:
  *
@@ -188,6 +193,7 @@ static void test_sync_pull(void)
 
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
+#endif /* !_WIN32 */
 
 /* ---- main ---- */
 
@@ -202,7 +208,11 @@ int main(void)
 
     run_test("server_starts",           test_server_starts);
     run_test("register_and_unregister", test_register_and_unregister);
+#ifndef _WIN32
     run_test("sync_pull",               test_sync_pull);
+#else
+    printf("skip  sync_pull (not supported on Windows)\n");
+#endif
 
     printf("---\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

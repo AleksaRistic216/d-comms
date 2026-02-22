@@ -11,19 +11,8 @@
  * No external dependencies; standard POSIX sockets only.
  */
 
-#define _GNU_SOURCE   /* strcasestr */
+#include "compat.h"
 #include "upnp.h"
-
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 
 /* ---- Persistent state written by upnp_setup, read by upnp_cleanup ---- */
 static char g_ctrl_url[512];
@@ -76,12 +65,11 @@ static int tcp_connect(const char *host, int port)
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { freeaddrinfo(res); return -1; }
 
-    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    dcomms_set_socktimeo(fd, SO_RCVTIMEO, 3);
+    dcomms_set_socktimeo(fd, SO_SNDTIMEO, 3);
 
     if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
-        close(fd); freeaddrinfo(res); return -1;
+        sock_close(fd); freeaddrinfo(res); return -1;
     }
     freeaddrinfo(res);
     return fd;
@@ -98,19 +86,19 @@ static int http_get(const char *host, int port, const char *path,
     snprintf(req, sizeof(req),
              "GET %s HTTP/1.0\r\nHost: %s:%d\r\nConnection: close\r\n\r\n",
              path, host, port);
-    if (write(fd, req, strlen(req)) <= 0) { close(fd); return -1; }
+    if (sock_send(fd, req, strlen(req)) <= 0) { sock_close(fd); return -1; }
 
     int total = 0;
     ssize_t n;
     char tmp[1024];
-    while ((n = read(fd, tmp, sizeof(tmp))) > 0) {
+    while ((n = sock_recv(fd, tmp, sizeof(tmp))) > 0) {
         if (total + (int)n < buflen - 1) {
             memcpy(buf + total, tmp, (size_t)n);
             total += (int)n;
         }
     }
     buf[total] = '\0';
-    close(fd);
+    sock_close(fd);
 
     char *body = strstr(buf, "\r\n\r\n");
     if (body) { body += 4; memmove(buf, body, strlen(body) + 1); }
@@ -147,19 +135,19 @@ static int soap_post(const char *host, int port, const char *path,
         "Connection: close\r\n"
         "\r\n%s",
         path, host, port, action_hdr, env_len, envelope);
-    if (write(fd, req, (size_t)req_len) <= 0) { close(fd); return -1; }
+    if (sock_send(fd, req, (size_t)req_len) <= 0) { sock_close(fd); return -1; }
 
     int total = 0;
     ssize_t n;
     char tmp[1024];
-    while ((n = read(fd, tmp, sizeof(tmp))) > 0) {
+    while ((n = sock_recv(fd, tmp, sizeof(tmp))) > 0) {
         if (total + (int)n < resplen - 1) {
             memcpy(resp + total, tmp, (size_t)n);
             total += (int)n;
         }
     }
     resp[total] = '\0';
-    close(fd);
+    sock_close(fd);
 
     char *body = strstr(resp, "\r\n\r\n");
     if (body) { body += 4; memmove(resp, body, strlen(body) + 1); }
@@ -240,8 +228,7 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
     int sfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sfd < 0) return -1;
 
-    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-    setsockopt(sfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    dcomms_set_socktimeo(sfd, SO_RCVTIMEO, 2);
 
     struct sockaddr_in mcast;
     memset(&mcast, 0, sizeof(mcast));
@@ -261,7 +248,7 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
             "ST: %s\r\n"
             "\r\n",
             targets[t]);
-        sendto(sfd, msg, (size_t)mlen, 0,
+        sendto(sfd, (const char *)msg, (size_t)mlen, 0,
                (struct sockaddr *)&mcast, sizeof(mcast));
 
         for (int r = 0; r < 4; r++) {
@@ -286,7 +273,7 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
             break;
         }
     }
-    close(sfd);
+    sock_close(sfd);
 
     if (location[0] == '\0') return -1;
 
@@ -318,7 +305,7 @@ static void get_local_ip(const char *gateway, char *out, int olen)
     struct sockaddr_in local;
     socklen_t llen = sizeof(local);
     getsockname(fd, (struct sockaddr *)&local, &llen);
-    close(fd);
+    sock_close(fd);
     inet_ntop(AF_INET, &local.sin_addr, out, (socklen_t)olen);
 }
 
