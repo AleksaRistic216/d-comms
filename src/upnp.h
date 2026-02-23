@@ -14,6 +14,11 @@ int  upnp_setup(int port, char *out_ip, int out_ip_len);
 /* Remove the port mapping created by upnp_setup. No-op if never succeeded. */
 void upnp_cleanup(int port);
 
+/* Fallback: query a well-known HTTP IP-echo service to learn our public IP
+   when UPnP is unavailable.  No port mapping is created.
+   Returns 0 and fills out_ip on success; -1 on failure. */
+int upnp_http_get_external_ip(char *out_ip, int out_ip_len);
+
 #ifdef __cplusplus
 }
 #endif

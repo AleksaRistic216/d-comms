@@ -423,6 +423,67 @@ int upnp_setup(int port, char *out_ip, int out_ip_len)
     return 0;
 }
 
+int upnp_http_get_external_ip(char *out_ip, int out_ip_len)
+{
+    /* Try a small list of reliable HTTP (not HTTPS) IP-echo services in
+       order; return the first valid IPv4 address we get back. */
+    static const struct { const char *host; const char *path; } svcs[] = {
+        { "checkip.amazonaws.com",  "/"             },
+        { "api.ipify.org",          "/?format=text" },
+        { "icanhazip.com",          "/"             },
+    };
+
+    for (int i = 0; i < (int)(sizeof(svcs) / sizeof(svcs[0])); i++) {
+        int fd = tcp_connect(svcs[i].host, 80);
+        if (fd < 0) continue;
+
+        char req[256];
+        snprintf(req, sizeof(req),
+                 "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
+                 svcs[i].path, svcs[i].host);
+        if (sock_send(fd, req, strlen(req)) <= 0) { sock_close(fd); continue; }
+
+        char resp[256] = "";
+        int total = 0;
+        ssize_t n;
+        char tmp[64];
+        while ((n = sock_recv(fd, tmp, sizeof(tmp))) > 0) {
+            if (total + (int)n < (int)sizeof(resp) - 1) {
+                memcpy(resp + total, tmp, (size_t)n);
+                total += (int)n;
+            }
+        }
+        resp[total] = '\0';
+        sock_close(fd);
+
+        /* Strip HTTP headers if present */
+        const char *p = strstr(resp, "\r\n\r\n");
+        p = p ? p + 4 : resp;
+
+        /* Skip leading whitespace */
+        while (*p == ' ' || *p == '\r' || *p == '\n') p++;
+
+        /* Copy until trailing whitespace */
+        int len = 0;
+        while (p[len] && p[len] != ' ' && p[len] != '\r' && p[len] != '\n'
+               && len < out_ip_len - 1)
+            len++;
+
+        if (len < 7) continue; /* too short to be x.x.x.x */
+
+        char candidate[64];
+        memcpy(candidate, p, (size_t)len);
+        candidate[len] = '\0';
+
+        struct in_addr addr;
+        if (inet_pton(AF_INET, candidate, &addr) != 1) continue;
+
+        memcpy(out_ip, candidate, (size_t)len + 1);
+        return 0;
+    }
+    return -1;
+}
+
 void upnp_cleanup(int port)
 {
     if (g_ctrl_url[0] == '\0' || port <= 0) return;

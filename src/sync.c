@@ -408,6 +408,8 @@ void sync_register(int port)
         char ext_ip[64] = {0};
         if (upnp_setup(port, ext_ip, sizeof(ext_ip)) == 0)
             setenv("DCOMMS_HOST", ext_ip, 1);
+        else if (upnp_http_get_external_ip(ext_ip, sizeof(ext_ip)) == 0)
+            setenv("DCOMMS_HOST", ext_ip, 1);
     }
 
     env_host = getenv("DCOMMS_HOST");
