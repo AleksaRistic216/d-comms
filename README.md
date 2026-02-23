@@ -90,7 +90,7 @@ The protocol organizes participants into two **turn groups**: Group A and Group 
 - Anonymity: participants are identified only by random 8-byte entity IDs
 - No central authority: the shared secret is exchanged out-of-band
 - LAN discovery: multicast UDP (239.255.77.77:55777) finds peers on the same network automatically
-- Internet discovery: Mainline DHT finds peers anywhere on the internet using the shared `user_key` as a rendezvous point — no server required
+- Internet discovery: Mainline DHT finds peers anywhere on the internet using the shared `secret_id` as a rendezvous point — no server required
 - NAT traversal: UPnP port mapping (attempted automatically) and TCP hole punching (fallback)
 - Deterministic ordering: message order is agreed upon by all readers without timestamps
 
@@ -327,11 +327,11 @@ Two independent mechanisms feed peer addresses into the same registry (`registry
 1. Creates a UDP socket and initialises a Mainline DHT node (using **jech/dht**, the same library used by Transmission and qBittorrent).
 2. Bootstraps by pinging `router.bittorrent.com`, `router.utorrent.com`, and `dht.transmissionbt.com`.
 3. Waits 30 seconds for the routing table to populate.
-4. For each chat added via `dht_client_add_chat(user_key_hex)`, derives a 20-byte **infohash** as `SHA256(user_key_hex)[0..19]` — the same value on both sides because they share `user_key` — and calls `dht_search` with the local sync port.
+4. For each chat added via `dht_client_add_chat(secret_id_hex)`, derives a 20-byte **infohash** as `SHA256(secret_id_hex)[0..19]` — the same value on both sides because they share `secret_id` — and calls `dht_search` with the local sync port.
 5. Re-runs each search every 180 seconds.
 6. On `DHT_EVENT_VALUES` (peers found), extracts each `(IPv4, port)` pair and calls `sync_add_peer`, which persists the entry to `registry.db`.
 
-The infohash leaks no key material: it is derived from the hex-encoded key string, not the raw key bytes, and only the first 20 bytes of a 32-byte SHA256 are used. Reverse-engineering the AES key from the infohash is not feasible.
+`secret_id` is the canonical identity of a chat: `SHA256(secret_id_hex)` is already the first chain prefix, so using it for DHT ties discovery directly to the chat's own identifier. The infohash does not expose the AES or HMAC keys — those are derived separately from both `user_key` and `secret_id` through an independent KDF.
 
 `dht_client_add_chat` is thread-safe and can be called at any time. New chats are queued and processed on the DHT thread's next iteration.
 
@@ -339,15 +339,16 @@ The infohash leaks no key material: it is derived from the hex-encoded key strin
 
 Most peers are behind NAT. Two complementary techniques are applied automatically:
 
-**UPnP (inside `sync_register`):** Before recording the local sync port in the registry, `sync_register` checks whether `DCOMMS_HOST` is already set. If not, it attempts UPnP IGD discovery (SSDP multicast to `239.255.255.250:1900`), retrieves the router's external IP, and requests a TCP port mapping (`external_port:sync_port → internal:sync_port`). On success it sets `DCOMMS_HOST` to the external IP so that the address written to `registry.db` and announced via multicast/DHT is the router's public IP. The mapping is removed when `sync_unregister` is called. If UPnP is unavailable the process continues without it.
+**UPnP (inside `sync_register`):** Before recording the local sync port in the registry, `sync_register` checks whether `DCOMMS_HOST` is already set. If not, it attempts UPnP IGD discovery (SSDP multicast to `239.255.255.250:1900`), retrieves the router's external IP, and requests a TCP port mapping (`external_port:sync_port → internal:sync_port`). On success it sets `DCOMMS_HOST` to the external IP so that the address written to `registry.db` and announced via multicast/DHT is the router's public IP. The mapping is removed when `sync_unregister` is called. If UPnP is unavailable, `sync_register` falls back to querying public HTTP IP-echo services (`checkip.amazonaws.com`, `api.ipify.org`, `icanhazip.com`) to determine the external IP — no port mapping is created in this case, so inbound connections rely on TCP hole punching.
 
 **TCP hole punching (inside `connect_to_peer`):** When a direct TCP connect to a peer fails, a second attempt is made using `SO_REUSEPORT` to bind the outgoing socket to the same port as the local sync server before calling `connect`. This sends a SYN whose source port is predictable by the remote peer. If both sides perform this simultaneously their NATs create matching state and a simultaneous TCP open succeeds. Both sides attempt this on every `sync_with_peers` cycle, so repeated retries make success likely even without precise timing coordination.
 
 | Scenario | Resolved by |
 |---|---|
 | Same LAN | Multicast discovery |
-| Different networks, UPnP-capable router | UPnP port mapping |
-| Behind NAT, no UPnP, non-symmetric NAT | TCP hole punching |
+| Different networks, UPnP-capable router | UPnP port mapping + DHT |
+| Different networks, no UPnP | HTTP IP echo (IP only) + DHT + TCP hole punching |
+| Behind symmetric NAT, no UPnP | Manual `sync_add_peer` + `DCOMMS_HOST` |
 
 ### Sync Protocol
 
@@ -515,10 +516,12 @@ int sync_with_peers(void);
 // Returns 0 on success, -1 on error.
 int dht_client_start(int sync_port, const char *basedir);
 
-// Announce and search for a chat identified by its user_key_hex (32 hex chars).
-// Derives infohash as SHA256(user_key_hex)[0..19].
+// Announce and search for a chat identified by its secret_id_hex (32 hex chars).
+// Derives infohash as SHA256(secret_id_hex)[0..19]. Both sides must pass the
+// same secret_id — the canonical chat identifier shared during proto_initialize /
+// proto_join — so they compute the same infohash and find each other in the DHT.
 // Thread-safe; can be called from any thread at any time.
-void dht_client_add_chat(const char *user_key_hex);
+void dht_client_add_chat(const char *secret_id_hex);
 
 // Stop the DHT client and join the background thread.
 void dht_client_stop(void);
@@ -569,7 +572,7 @@ int main(void)
     /* Start DHT and announce this chat */
     if (port > 0) {
         dht_client_start(port, ".");
-        dht_client_add_chat(user_key);
+        dht_client_add_chat(secret_id);  /* secret_id is the DHT rendezvous point */
     }
 
     /* Send a message */
@@ -608,7 +611,7 @@ int port = sync_start_server();
 if (port > 0) sync_register(port);
 if (port > 0) {
     dht_client_start(port, ".");
-    dht_client_add_chat(key);
+    dht_client_add_chat(id);  /* id = secret_id, the DHT rendezvous point */
 }
 
 sync_with_peers();
@@ -647,7 +650,7 @@ entity_id=<16 hex chars>
 
 | Variable | Effect |
 |----------|--------|
-| `DCOMMS_HOST` | Advertised IP written to `registry.db` and announced via multicast. Set to your public IP when UPnP is unavailable. Defaults to `127.0.0.1`. When UPnP succeeds this is set automatically inside `sync_register`. |
+| `DCOMMS_HOST` | Advertised IP written to `registry.db` and announced via multicast/DHT. Set explicitly to override automatic detection. `sync_register` resolves this automatically in order: UPnP → HTTP IP echo → `127.0.0.1`. |
 
 ---
 
