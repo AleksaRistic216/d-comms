@@ -37,11 +37,14 @@ static pthread_mutex_t  g_queue_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---- Infohash derivation ---- */
 
-/* SHA256(user_key_hex_string)[0..19] — both peers compute identically. */
-static void user_key_to_infohash(const char *user_key_hex, unsigned char ih[20])
+/* SHA256(secret_id_hex_string)[0..19] — both peers compute identically.
+   secret_id is the canonical chat identifier (SHA256(secret_id_hex) is also
+   the first chain prefix), so this ties DHT discovery directly to the chat
+   identity rather than the encryption key. */
+static void secret_id_to_infohash(const char *secret_id_hex, unsigned char ih[20])
 {
     uint8_t hash[32];
-    sha256((const uint8_t *)user_key_hex, strlen(user_key_hex), hash);
+    sha256((const uint8_t *)secret_id_hex, strlen(secret_id_hex), hash);
     memcpy(ih, hash, 20);
 }
 
@@ -166,7 +169,7 @@ static void drain_queue(void)
         pthread_mutex_unlock(&g_queue_mutex);
 
         unsigned char ih[20];
-        user_key_to_infohash(key_hex, ih);
+        secret_id_to_infohash(key_hex, ih);
 
         /* Skip if already active */
         int found = 0;
@@ -292,16 +295,16 @@ int dht_client_start(int sync_port, const char *basedir)
     return 0;
 }
 
-void dht_client_add_chat(const char *user_key_hex)
+void dht_client_add_chat(const char *secret_id_hex)
 {
-    if (!user_key_hex || !g_dht_running) return;
+    if (!secret_id_hex || !g_dht_running) return;
 
     pthread_mutex_lock(&g_queue_mutex);
 
     /* Dedup in queue: scan existing pending entries */
     int head = g_pending_head;
     while (head != g_pending_tail) {
-        if (strncmp(g_pending[head], user_key_hex, 32) == 0) {
+        if (strncmp(g_pending[head], secret_id_hex, 32) == 0) {
             pthread_mutex_unlock(&g_queue_mutex);
             return;
         }
@@ -310,7 +313,7 @@ void dht_client_add_chat(const char *user_key_hex)
 
     int next = (g_pending_tail + 1) % QUEUE_SIZE;
     if (next != g_pending_head) { /* not full */
-        strncpy(g_pending[g_pending_tail], user_key_hex, 32);
+        strncpy(g_pending[g_pending_tail], secret_id_hex, 32);
         g_pending[g_pending_tail][32] = '\0';
         g_pending_tail = next;
     }
