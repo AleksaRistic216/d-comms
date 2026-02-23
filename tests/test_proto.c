@@ -422,12 +422,15 @@ static void test_save_and_load_chat(void)
     proto_initialize(&a, user_key, secret_id);
     proto_send(&a, "persisted");
 
-    int r = proto_save_chat(&a, "tc", tmpdir);
+    /* Use "." as basedir: setup() has already chdir'd into tmpdir, so "."
+       resolves correctly on all platforms regardless of whether tmpdir is
+       an absolute or relative path. */
+    int r = proto_save_chat(&a, "tc", ".");
     CHECK(r == 0);
     proto_chat_cleanup(&a);
 
     proto_chat b;
-    r = proto_load_chat(&b, "tc", tmpdir);
+    r = proto_load_chat(&b, "tc", ".");
     CHECK(r == 0);
     CHECK(b.is_initiator == 1);
     CHECK(strcmp(b.user_key,  user_key)  == 0);
@@ -441,12 +444,8 @@ static void test_save_and_load_chat(void)
     CHECK(b.state == 1);
 
     /* Cleanup chat file. */
-    char chat_path[256];
-    snprintf(chat_path, sizeof(chat_path), "%s/chats/tc.chat", tmpdir);
-    unlink(chat_path);
-    char chats_dir[256];
-    snprintf(chats_dir, sizeof(chats_dir), "%s/chats", tmpdir);
-    rmdir(chats_dir);
+    unlink("./chats/tc.chat");
+    rmdir("./chats");
 
     proto_chat_cleanup(&b);
     teardown(tmpdir);

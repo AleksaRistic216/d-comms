@@ -16,9 +16,11 @@ static inline char *mkdtemp(char *tmpl)
     return tmpl;
 }
 
-#  define DCOMMS_TEST_TMPDIR "dcomms_ptest_XXXXXX"
+#  define DCOMMS_TEST_TMPDIR      "dcomms_ptest_XXXXXX"
+#  define DCOMMS_TEST_SYNC_TMPDIR "dcomms_stest_XXXXXX"
 #else
-#  define DCOMMS_TEST_TMPDIR "/tmp/dcomms_ptest_XXXXXX"
+#  define DCOMMS_TEST_TMPDIR      "/tmp/dcomms_ptest_XXXXXX"
+#  define DCOMMS_TEST_SYNC_TMPDIR "/tmp/dcomms_stest_XXXXXX"
 #endif
 
 #endif /* DCOMMS_TEST_COMPAT_H */

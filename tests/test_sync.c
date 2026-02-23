@@ -76,7 +76,8 @@ static int count_db_lines(void)
 /* sync_start_server must bind to a valid loopback port. */
 static void test_server_starts(void)
 {
-    char tmpdir[] = "/tmp/dcomms_stest_XXXXXX";
+    char tmpdir[64];
+    strcpy(tmpdir, DCOMMS_TEST_SYNC_TMPDIR);
     if (!mkdtemp(tmpdir)) { CHECK(0); return; }
     chdir(tmpdir);
 
@@ -92,7 +93,8 @@ static void test_server_starts(void)
    sync_unregister must remove it. */
 static void test_register_and_unregister(void)
 {
-    char tmpdir[] = "/tmp/dcomms_stest_XXXXXX";
+    char tmpdir[64];
+    strcpy(tmpdir, DCOMMS_TEST_SYNC_TMPDIR);
     if (!mkdtemp(tmpdir)) { CHECK(0); return; }
     chdir(tmpdir);
 

@@ -551,13 +551,14 @@ int proto_save_chat(const proto_chat *chat, const char *name, const char *basedi
 
 int proto_load_chat(proto_chat *chat, const char *name, const char *basedir)
 {
+    memset(chat, 0, sizeof(*chat));
+
     char path[512];
     snprintf(path, sizeof(path), "%s/chats/%s.chat", basedir, name);
     FILE *f = fopen(path, "r");
     if (!f) return -1;
 
     char line[256];
-    memset(chat, 0, sizeof(*chat));
 
     while (fgets(line, sizeof(line), f)) {
         int len = (int)strlen(line);
