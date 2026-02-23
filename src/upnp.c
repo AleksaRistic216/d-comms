@@ -254,11 +254,15 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
     /* On macOS, multicast routing is independent of the default route and
        defaults to lo0 without an explicit interface.  Set IP_MULTICAST_IF
        to the interface that actually faces the LAN so the M-SEARCH reaches
-       the router rather than looping back. */
+       the router rather than looping back.
+       Important: use a unicast address for the interface lookup — using the
+       multicast address itself would follow the multicast routing table,
+       which on macOS also points to lo0, defeating the purpose. */
     char local_ip[64];
-    get_local_ip("239.255.255.250", local_ip, sizeof(local_ip));
+    get_local_ip("8.8.8.8", local_ip, sizeof(local_ip));
     struct in_addr iface;
-    if (inet_pton(AF_INET, local_ip, &iface) == 1)
+    if (inet_pton(AF_INET, local_ip, &iface) == 1 &&
+            iface.s_addr != htonl(INADDR_LOOPBACK))
         setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_IF,
                    SOCKOPT_VAL(&iface), sizeof(iface));
 
