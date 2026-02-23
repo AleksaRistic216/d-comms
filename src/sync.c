@@ -25,7 +25,8 @@
 static dcomms_socket_t g_server_fd = DCOMMS_INVALID_SOCKET;
 static pthread_t g_server_tid;
 static volatile int g_server_quit;
-static char g_my_host[64];
+static char g_my_host[64];    /* external/announced IP for DHT and registry */
+static char g_local_host[64]; /* LAN IP used for multicast announcements */
 static int  g_my_port;
 static int  g_local_port;  /* actual bound TCP port, used for hole punching */
 
@@ -89,11 +90,43 @@ static void hs_free(hash_set *hs)
     }
 }
 
+/* ---- local LAN IP detection ---- */
+
+/* Detect the local LAN IPv4 by routing a UDP socket toward a public address
+   and reading back the source address chosen by the kernel.  No packets are
+   actually sent.  Returns 0 on success, -1 if unavailable or loopback. */
+static int get_local_ip(char *buf, size_t buflen)
+{
+    int sfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sfd < 0) return -1;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(53);
+    inet_pton(AF_INET, "8.8.8.8", &addr.sin_addr);
+
+    int ok = (connect(sfd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    if (ok) {
+        socklen_t len = sizeof(addr);
+        ok = (getsockname(sfd, (struct sockaddr *)&addr, &len) == 0);
+        if (ok && !inet_ntop(AF_INET, &addr.sin_addr, buf, (socklen_t)buflen))
+            ok = 0;
+        if (ok && strncmp(buf, "127.", 4) == 0)
+            ok = 0;
+    }
+    sock_close(sfd);
+    return ok ? 0 : -1;
+}
+
 /* ---- connect helper ---- */
 
 static int connect_to_peer_hp(const char *host, int port); /* forward decl */
 
-/* Open a TCP connection to host:port. Returns fd on success, -1 on failure. */
+/* Open a TCP connection to host:port.  Uses a non-blocking connect with
+   select() so the timeout is reliable on all platforms (SO_SNDTIMEO is
+   silently ignored by connect() on macOS and some Linux configurations).
+   Falls back to TCP hole punching when the normal connect fails. */
 static int connect_to_peer(const char *host, int port)
 {
     char service[16];
@@ -113,14 +146,36 @@ static int connect_to_peer(const char *host, int port)
         sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (sfd < 0) continue;
 
-        dcomms_set_socktimeo(sfd, SO_RCVTIMEO, SYNC_TIMEOUT);
-        dcomms_set_socktimeo(sfd, SO_SNDTIMEO, SYNC_TIMEOUT);
+        dcomms_set_nonblocking(sfd, 1);
 
-        if (connect(sfd, rp->ai_addr, rp->ai_addrlen) == 0)
+        int rc = connect(sfd, rp->ai_addr, rp->ai_addrlen);
+        if (rc == 0) {
+            /* Immediate success (loopback or LAN) */
+            dcomms_set_blocking(sfd);
+            dcomms_set_socktimeo(sfd, SO_RCVTIMEO, SYNC_TIMEOUT);
             break;
+        }
+        if (SOCK_ERRNO != SOCK_EINPROGRESS) {
+            sock_close(sfd); sfd = -1; continue;
+        }
 
-        sock_close(sfd);
-        sfd = -1;
+        /* Wait up to SYNC_TIMEOUT seconds for the connection to complete */
+        fd_set wfds, efds;
+        FD_ZERO(&wfds); FD_ZERO(&efds);
+        FD_SET(sfd, &wfds); FD_SET(sfd, &efds);
+        struct timeval tv = { .tv_sec = SYNC_TIMEOUT, .tv_usec = 0 };
+        if (select(sfd + 1, NULL, &wfds, &efds, &tv) > 0
+                && FD_ISSET(sfd, &wfds) && !FD_ISSET(sfd, &efds)) {
+            int err = 0;
+            socklen_t elen = sizeof(err);
+            getsockopt(sfd, SOL_SOCKET, SO_ERROR, SOCKOPT_OUTVAL(&err), &elen);
+            if (err == 0) {
+                dcomms_set_blocking(sfd);
+                dcomms_set_socktimeo(sfd, SO_RCVTIMEO, SYNC_TIMEOUT);
+                break;
+            }
+        }
+        sock_close(sfd); sfd = -1;
     }
     freeaddrinfo(res);
 
@@ -251,8 +306,10 @@ static void *discovery_thread(void *arg)
     inet_pton(AF_INET, DISCOVERY_GROUP, &mcast_addr.sin_addr);
     mcast_addr.sin_port = htons(DISCOVERY_PORT);
 
+    /* Announce the LAN IP so peers on the same network connect directly
+       rather than routing through NAT (which requires hairpinning support). */
     char announce[128];
-    snprintf(announce, sizeof(announce), "dcomms %s:%d", g_my_host, g_my_port);
+    snprintf(announce, sizeof(announce), "dcomms %s:%d", g_local_host, g_my_port);
     size_t ann_len = strlen(announce);
 
     time_t last_announce = 0;
@@ -281,7 +338,7 @@ static void *discovery_thread(void *arg)
 
         char host[64]; int port;
         if (sscanf(buf, "dcomms %63[^:]:%d", host, &port) == 2 &&
-            !(strcmp(host, g_my_host) == 0 && port == g_my_port)) {
+            !(strcmp(host, g_local_host) == 0 && port == g_my_port)) {
             sync_add_peer(host, port);
         }
     }
@@ -401,6 +458,12 @@ int sync_start_server(void)
 
 void sync_register(int port)
 {
+    /* Detect LAN IP first (used for multicast and as last-resort fallback). */
+    char lan_ip[64] = {0};
+    get_local_ip(lan_ip, sizeof(lan_ip));
+    strncpy(g_local_host, lan_ip[0] ? lan_ip : "127.0.0.1", sizeof(g_local_host) - 1);
+    g_local_host[sizeof(g_local_host) - 1] = '\0';
+
     /* Try UPnP to get external IP and open a port mapping, but only when
        DCOMMS_HOST has not been set explicitly by the caller/environment. */
     const char *env_host = getenv("DCOMMS_HOST");
@@ -413,7 +476,8 @@ void sync_register(int port)
     }
 
     env_host = getenv("DCOMMS_HOST");
-    const char *host = (env_host && env_host[0]) ? env_host : "127.0.0.1";
+    /* Fall back to LAN IP instead of loopback so same-LAN peers can reach us. */
+    const char *host = (env_host && env_host[0]) ? env_host : g_local_host;
     strncpy(g_my_host, host, sizeof(g_my_host) - 1);
     g_my_host[sizeof(g_my_host) - 1] = '\0';
     g_my_port = port;
