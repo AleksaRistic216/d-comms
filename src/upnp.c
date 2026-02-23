@@ -14,6 +14,11 @@
 #include "compat.h"
 #include "upnp.h"
 
+#ifndef DCOMMS_WINDOWS
+#  include <ifaddrs.h>
+#  include <net/if.h>
+#endif
+
 /* ---- Persistent state written by upnp_setup, read by upnp_cleanup ---- */
 static char g_ctrl_url[512];
 static char g_service_type[128];
@@ -235,10 +240,11 @@ static int find_wan_service(const char *xml,
     return -1;
 }
 
-static int ssdp_discover(char *ctrl_url, int curl_len,
-                         char *svc_type,  int st_len)
+/* Send SSDP M-SEARCH on a specific outgoing interface address.
+   Fills location[] on success and returns 0; returns -1 if no response. */
+static int ssdp_search_iface(struct in_addr iface_addr,
+                              char *location, int loc_len)
 {
-    /* Search targets in priority order */
     static const char *targets[] = {
         "urn:schemas-upnp-org:service:WANIPConnection:1",
         "urn:schemas-upnp-org:service:WANPPPConnection:1",
@@ -250,21 +256,8 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
     if (sfd < 0) return -1;
 
     dcomms_set_socktimeo(sfd, SO_RCVTIMEO, 2);
-
-    /* On macOS, multicast routing is independent of the default route and
-       defaults to lo0 without an explicit interface.  Set IP_MULTICAST_IF
-       to the interface that actually faces the LAN so the M-SEARCH reaches
-       the router rather than looping back.
-       Important: use a unicast address for the interface lookup — using the
-       multicast address itself would follow the multicast routing table,
-       which on macOS also points to lo0, defeating the purpose. */
-    char local_ip[64];
-    get_local_ip("8.8.8.8", local_ip, sizeof(local_ip));
-    struct in_addr iface;
-    if (inet_pton(AF_INET, local_ip, &iface) == 1 &&
-            iface.s_addr != htonl(INADDR_LOOPBACK))
-        setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_IF,
-                   SOCKOPT_VAL(&iface), sizeof(iface));
+    setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_IF,
+               SOCKOPT_VAL(&iface_addr), sizeof(iface_addr));
 
     struct sockaddr_in mcast;
     memset(&mcast, 0, sizeof(mcast));
@@ -272,7 +265,7 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
     inet_pton(AF_INET, "239.255.255.250", &mcast.sin_addr);
     mcast.sin_port = htons(1900);
 
-    char location[512] = "";
+    location[0] = '\0';
 
     for (int t = 0; targets[t] && location[0] == '\0'; t++) {
         char msg[512];
@@ -303,15 +296,52 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
             char *eol = loc;
             while (*eol && *eol != '\r' && *eol != '\n') eol++;
             int llen = (int)(eol - loc);
-            if (llen <= 0 || llen >= (int)sizeof(location) - 1) continue;
+            if (llen <= 0 || llen >= loc_len - 1) continue;
             memcpy(location, loc, (size_t)llen);
             location[llen] = '\0';
             break;
         }
     }
     sock_close(sfd);
+    return location[0] != '\0' ? 0 : -1;
+}
 
-    if (location[0] == '\0') return -1;
+static int ssdp_discover(char *ctrl_url, int curl_len,
+                         char *svc_type,  int st_len)
+{
+    char location[512];
+
+#ifdef DCOMMS_WINDOWS
+    /* Windows: use the default-route interface */
+    struct in_addr iface;
+    iface.s_addr = htonl(INADDR_ANY);
+    if (ssdp_search_iface(iface, location, sizeof(location)) != 0)
+        return -1;
+#else
+    /* POSIX: enumerate every multicast-capable IPv4 interface and try each.
+       This is essential on macOS, where multicast routing does not follow
+       the default route and will use lo0 unless an interface is specified
+       explicitly. Trying every interface guarantees we reach the router
+       regardless of how the OS orders them. */
+    int found = 0;
+    struct ifaddrs *ifap = NULL;
+    if (getifaddrs(&ifap) == 0) {
+        for (struct ifaddrs *ifa = ifap; ifa && !found; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_addr) continue;
+            if (ifa->ifa_addr->sa_family != AF_INET) continue;
+            if (!(ifa->ifa_flags & IFF_UP))        continue;
+            if (!(ifa->ifa_flags & IFF_MULTICAST))  continue;
+            if (ifa->ifa_flags & IFF_LOOPBACK)      continue;
+
+            struct in_addr addr =
+                ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+            if (ssdp_search_iface(addr, location, sizeof(location)) == 0)
+                found = 1;
+        }
+        freeifaddrs(ifap);
+    }
+    if (!found) return -1;
+#endif
 
     /* Fetch and parse the IGD XML description */
     char host[128]; int port; char path[256];
@@ -333,20 +363,14 @@ int upnp_setup(int port, char *out_ip, int out_ip_len)
 
     char svc_type[128];
     if (ssdp_discover(g_ctrl_url, sizeof(g_ctrl_url),
-                      svc_type,   sizeof(svc_type)) != 0) {
-        fprintf(stderr, "[upnp] ssdp_discover failed\n");
+                      svc_type,   sizeof(svc_type)) != 0)
         return -1;
-    }
-    fprintf(stderr, "[upnp] ssdp_discover ok: ctrl_url=%s svc=%s\n",
-            g_ctrl_url, svc_type);
     strncpy(g_service_type, svc_type, sizeof(g_service_type) - 1);
 
     char ctrl_host[128]; int ctrl_port; char ctrl_path[256];
     if (parse_url(g_ctrl_url, ctrl_host, sizeof(ctrl_host),
-                  &ctrl_port, ctrl_path, sizeof(ctrl_path)) != 0) {
-        fprintf(stderr, "[upnp] parse_url failed\n");
+                  &ctrl_port, ctrl_path, sizeof(ctrl_path)) != 0)
         return -1;
-    }
 
     /* Get external IP */
     char ip_body[256];
@@ -356,23 +380,17 @@ int upnp_setup(int port, char *out_ip, int out_ip_len)
     char resp[4096];
     if (soap_post(ctrl_host, ctrl_port, ctrl_path,
                   g_service_type, "GetExternalIPAddress",
-                  ip_body, resp, sizeof(resp)) != 0) {
-        fprintf(stderr, "[upnp] GetExternalIPAddress soap_post failed\n");
+                  ip_body, resp, sizeof(resp)) != 0)
         return -1;
-    }
 
     char ext_ip[64] = "";
     if (xml_get(resp, "NewExternalIPAddress", ext_ip, sizeof(ext_ip)) != 0
-            || ext_ip[0] == '\0') {
-        fprintf(stderr, "[upnp] GetExternalIPAddress parse failed; resp: %.256s\n", resp);
+            || ext_ip[0] == '\0')
         return -1;
-    }
-    fprintf(stderr, "[upnp] external IP: %s\n", ext_ip);
 
     /* Get local IP toward the router */
     char local_ip[64];
     get_local_ip(ctrl_host, local_ip, sizeof(local_ip));
-    fprintf(stderr, "[upnp] local IP toward router: %s\n", local_ip);
 
     /* Add port mapping */
     char map_body[1024];
@@ -391,14 +409,11 @@ int upnp_setup(int port, char *out_ip, int out_ip_len)
 
     if (soap_post(ctrl_host, ctrl_port, ctrl_path,
                   g_service_type, "AddPortMapping",
-                  map_body, resp, sizeof(resp)) != 0) {
-        fprintf(stderr, "[upnp] AddPortMapping soap_post failed\n");
+                  map_body, resp, sizeof(resp)) != 0)
         return -1;
-    }
 
     /* A SOAP fault means the mapping was refused */
     if (strstr(resp, "errorCode") || strstr(resp, ":Fault")) {
-        fprintf(stderr, "[upnp] AddPortMapping soap fault: %.256s\n", resp);
         g_ctrl_url[0] = '\0';
         return -1;
     }
