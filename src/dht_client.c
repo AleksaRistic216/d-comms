@@ -12,8 +12,8 @@
 
 #define MAX_ACTIVE_HASHES  64
 #define QUEUE_SIZE         64
-#define BOOTSTRAP_DELAY    30    /* seconds before first search */
-#define SEARCH_INTERVAL    180   /* seconds between re-searches */
+#define BOOTSTRAP_DELAY    5    /* seconds before first search */
+#define SEARCH_INTERVAL    30   /* seconds between re-searches */
 #define SELECT_TIMEOUT_MAX 1     /* cap select timeout to stay responsive */
 
 /* ---- State ---- */
