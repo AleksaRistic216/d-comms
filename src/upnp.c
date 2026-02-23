@@ -174,6 +174,27 @@ static int xml_get(const char *xml, const char *tag, char *out, int olen)
     return 0;
 }
 
+/* ---- Determine local IP toward a given host ---- */
+
+static void get_local_ip(const char *gateway, char *out, int olen)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { strncpy(out, "127.0.0.1", (size_t)olen); return; }
+
+    struct sockaddr_in gw;
+    memset(&gw, 0, sizeof(gw));
+    gw.sin_family = AF_INET;
+    inet_pton(AF_INET, gateway, &gw.sin_addr);
+    gw.sin_port = htons(1900);
+    connect(fd, (struct sockaddr *)&gw, sizeof(gw));
+
+    struct sockaddr_in local;
+    socklen_t llen = sizeof(local);
+    getsockname(fd, (struct sockaddr *)&local, &llen);
+    sock_close(fd);
+    inet_ntop(AF_INET, &local.sin_addr, out, (socklen_t)olen);
+}
+
 /* ---- SSDP discovery ---- */
 
 /* Walk <service>...</service> blocks in xml; return controlURL and
@@ -229,6 +250,17 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
     if (sfd < 0) return -1;
 
     dcomms_set_socktimeo(sfd, SO_RCVTIMEO, 2);
+
+    /* On macOS, multicast routing is independent of the default route and
+       defaults to lo0 without an explicit interface.  Set IP_MULTICAST_IF
+       to the interface that actually faces the LAN so the M-SEARCH reaches
+       the router rather than looping back. */
+    char local_ip[64];
+    get_local_ip("239.255.255.250", local_ip, sizeof(local_ip));
+    struct in_addr iface;
+    if (inet_pton(AF_INET, local_ip, &iface) == 1)
+        setsockopt(sfd, IPPROTO_IP, IP_MULTICAST_IF,
+                   SOCKOPT_VAL(&iface), sizeof(iface));
 
     struct sockaddr_in mcast;
     memset(&mcast, 0, sizeof(mcast));
@@ -286,27 +318,6 @@ static int ssdp_discover(char *ctrl_url, int curl_len,
     if (http_get(host, port, path, desc, sizeof(desc)) != 0) return -1;
 
     return find_wan_service(desc, host, port, ctrl_url, curl_len, svc_type, st_len);
-}
-
-/* ---- Determine local IP toward a given host ---- */
-
-static void get_local_ip(const char *gateway, char *out, int olen)
-{
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) { strncpy(out, "127.0.0.1", (size_t)olen); return; }
-
-    struct sockaddr_in gw;
-    memset(&gw, 0, sizeof(gw));
-    gw.sin_family = AF_INET;
-    inet_pton(AF_INET, gateway, &gw.sin_addr);
-    gw.sin_port = htons(1900);
-    connect(fd, (struct sockaddr *)&gw, sizeof(gw));
-
-    struct sockaddr_in local;
-    socklen_t llen = sizeof(local);
-    getsockname(fd, (struct sockaddr *)&local, &llen);
-    sock_close(fd);
-    inet_ntop(AF_INET, &local.sin_addr, out, (socklen_t)olen);
 }
 
 /* ---- Public API ---- */
