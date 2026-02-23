@@ -18,11 +18,16 @@
 #  include <windows.h>
 #  include <io.h>
 #  include <direct.h>
+#  include <fcntl.h>
 #  include <basetsd.h>
    typedef SSIZE_T ssize_t;
 #  define LOCK_SH 1
 #  define LOCK_EX 2
 #  define LOCK_UN 8
+   /* Winsock2 uses SD_BOTH; map POSIX name */
+#  ifndef SHUT_RDWR
+#    define SHUT_RDWR SD_BOTH
+#  endif
 #else
 #  include <sys/socket.h>
 #  include <sys/select.h>
@@ -121,11 +126,13 @@ static inline int dcomms_setenv(const char *name, const char *value, int overwri
 #  define sock_recv(fd, b, n) read(fd, b, n)
 #endif
 
-/* ---- setsockopt value cast ---- */
+/* ---- setsockopt / getsockopt value casts ---- */
 #ifdef DCOMMS_WINDOWS
-#  define SOCKOPT_VAL(p) ((const char *)(p))
+#  define SOCKOPT_VAL(p)    ((const char *)(p))  /* setsockopt: const char* */
+#  define SOCKOPT_OUTVAL(p) ((char *)(p))         /* getsockopt: char*       */
 #else
-#  define SOCKOPT_VAL(p) (p)
+#  define SOCKOPT_VAL(p)    (p)
+#  define SOCKOPT_OUTVAL(p) (p)
 #endif
 
 /* ---- socket error codes ---- */

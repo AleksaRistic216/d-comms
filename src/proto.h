@@ -7,7 +7,8 @@ extern "C" {
 
 #include <stdint.h>
 #include <time.h>
-#ifdef _WIN32
+#ifdef _MSC_VER
+  /* MSVC has no sys/types.h; MinGW provides off_t via its own headers */
   typedef long long off_t;
 #else
 #  include <sys/types.h>

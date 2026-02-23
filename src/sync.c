@@ -192,7 +192,7 @@ static int connect_to_peer_hp(const char *host, int port)
                 && FD_ISSET(sfd, &wfds) && !FD_ISSET(sfd, &efds)) {
             int err = 0;
             socklen_t elen = sizeof(err);
-            getsockopt(sfd, SOL_SOCKET, SO_ERROR, &err, &elen);
+            getsockopt(sfd, SOL_SOCKET, SO_ERROR, SOCKOPT_OUTVAL(&err), &elen);
             if (err == 0) {
                 dcomms_set_blocking(sfd);
                 break;
