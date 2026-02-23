@@ -333,14 +333,20 @@ int upnp_setup(int port, char *out_ip, int out_ip_len)
 
     char svc_type[128];
     if (ssdp_discover(g_ctrl_url, sizeof(g_ctrl_url),
-                      svc_type,   sizeof(svc_type)) != 0)
+                      svc_type,   sizeof(svc_type)) != 0) {
+        fprintf(stderr, "[upnp] ssdp_discover failed\n");
         return -1;
+    }
+    fprintf(stderr, "[upnp] ssdp_discover ok: ctrl_url=%s svc=%s\n",
+            g_ctrl_url, svc_type);
     strncpy(g_service_type, svc_type, sizeof(g_service_type) - 1);
 
     char ctrl_host[128]; int ctrl_port; char ctrl_path[256];
     if (parse_url(g_ctrl_url, ctrl_host, sizeof(ctrl_host),
-                  &ctrl_port, ctrl_path, sizeof(ctrl_path)) != 0)
+                  &ctrl_port, ctrl_path, sizeof(ctrl_path)) != 0) {
+        fprintf(stderr, "[upnp] parse_url failed\n");
         return -1;
+    }
 
     /* Get external IP */
     char ip_body[256];
@@ -350,17 +356,23 @@ int upnp_setup(int port, char *out_ip, int out_ip_len)
     char resp[4096];
     if (soap_post(ctrl_host, ctrl_port, ctrl_path,
                   g_service_type, "GetExternalIPAddress",
-                  ip_body, resp, sizeof(resp)) != 0)
+                  ip_body, resp, sizeof(resp)) != 0) {
+        fprintf(stderr, "[upnp] GetExternalIPAddress soap_post failed\n");
         return -1;
+    }
 
     char ext_ip[64] = "";
     if (xml_get(resp, "NewExternalIPAddress", ext_ip, sizeof(ext_ip)) != 0
-            || ext_ip[0] == '\0')
+            || ext_ip[0] == '\0') {
+        fprintf(stderr, "[upnp] GetExternalIPAddress parse failed; resp: %.256s\n", resp);
         return -1;
+    }
+    fprintf(stderr, "[upnp] external IP: %s\n", ext_ip);
 
     /* Get local IP toward the router */
     char local_ip[64];
     get_local_ip(ctrl_host, local_ip, sizeof(local_ip));
+    fprintf(stderr, "[upnp] local IP toward router: %s\n", local_ip);
 
     /* Add port mapping */
     char map_body[1024];
@@ -379,11 +391,14 @@ int upnp_setup(int port, char *out_ip, int out_ip_len)
 
     if (soap_post(ctrl_host, ctrl_port, ctrl_path,
                   g_service_type, "AddPortMapping",
-                  map_body, resp, sizeof(resp)) != 0)
+                  map_body, resp, sizeof(resp)) != 0) {
+        fprintf(stderr, "[upnp] AddPortMapping soap_post failed\n");
         return -1;
+    }
 
     /* A SOAP fault means the mapping was refused */
     if (strstr(resp, "errorCode") || strstr(resp, ":Fault")) {
+        fprintf(stderr, "[upnp] AddPortMapping soap fault: %.256s\n", resp);
         g_ctrl_url[0] = '\0';
         return -1;
     }
