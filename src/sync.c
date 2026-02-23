@@ -92,11 +92,63 @@ static void hs_free(hash_set *hs)
 
 /* ---- local LAN IP detection ---- */
 
-/* Detect the local LAN IPv4 by routing a UDP socket toward a public address
-   and reading back the source address chosen by the kernel.  No packets are
-   actually sent.  Returns 0 on success, -1 if unavailable or loopback. */
+#ifndef DCOMMS_WINDOWS
+#  include <ifaddrs.h>
+#endif
+
+/* Score a dotted-decimal IPv4 string as a LAN address candidate.
+   Higher is better; -1 means not a private LAN address. */
+static int lan_score(const char *ip)
+{
+    if (strncmp(ip, "127.",    4) == 0) return -1; /* loopback         */
+    if (strncmp(ip, "169.254.", 8) == 0) return -1; /* link-local       */
+    if (strncmp(ip, "192.168.", 8) == 0) return  3; /* home LAN (best)  */
+    if (strncmp(ip, "10.",      3) == 0) return  2; /* class-A private  */
+    /* 172.16.0.0/12 — includes Docker 172.17+, score lower */
+    if (strncmp(ip, "172.", 4) == 0) {
+        int second = atoi(ip + 4);
+        if (second >= 16 && second <= 31) return 1;
+    }
+    return -1; /* public or unrecognised — skip */
+}
+
+/* Enumerate network interfaces and return the best LAN IPv4 address.
+   Prefers 192.168.x over 10.x over 172.16-31.x so that VPN/Docker
+   bridges (usually in the 172.x range) are not chosen over the real
+   Wi-Fi or Ethernet interface.
+   Falls back to the UDP-routing trick on Windows where getifaddrs is
+   not available.  Returns 0 on success, -1 on failure. */
 static int get_local_ip(char *buf, size_t buflen)
 {
+#ifndef DCOMMS_WINDOWS
+    struct ifaddrs *ifap;
+    if (getifaddrs(&ifap) != 0) return -1;
+
+    char best[INET_ADDRSTRLEN] = {0};
+    int  best_score = -1;
+
+    for (struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+        char ip[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip))) continue;
+        int score = lan_score(ip);
+        if (score > best_score) {
+            best_score = score;
+            strncpy(best, ip, sizeof(best) - 1);
+        }
+    }
+    freeifaddrs(ifap);
+
+    if (best[0]) {
+        strncpy(buf, best, buflen - 1);
+        buf[buflen - 1] = '\0';
+        return 0;
+    }
+    return -1;
+#else
+    /* Windows: UDP routing trick — connect a DGRAM socket toward a public
+       address and read back the source address the kernel would use. */
     int sfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sfd < 0) return -1;
 
@@ -112,11 +164,12 @@ static int get_local_ip(char *buf, size_t buflen)
         ok = (getsockname(sfd, (struct sockaddr *)&addr, &len) == 0);
         if (ok && !inet_ntop(AF_INET, &addr.sin_addr, buf, (socklen_t)buflen))
             ok = 0;
-        if (ok && strncmp(buf, "127.", 4) == 0)
+        if (ok && lan_score(buf) < 0)
             ok = 0;
     }
     sock_close(sfd);
     return ok ? 0 : -1;
+#endif
 }
 
 /* ---- connect helper ---- */
