@@ -2,10 +2,8 @@
  * AES-256 implementation with CBC mode and PKCS7 padding.
  */
 
+#include "compat.h"
 #include "aes.h"
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
 
 /* ---- AES-256 core ---- */
 
@@ -187,13 +185,6 @@ void aes256_decrypt_block(const aes256_ctx *ctx, const uint8_t in[16], uint8_t o
 
 /* ---- CBC mode with PKCS7 padding ---- */
 
-static void read_urandom(uint8_t *buf, size_t len)
-{
-    FILE *f = fopen("/dev/urandom", "rb");
-    if (!f) { perror("urandom"); exit(1); }
-    if (fread(buf, 1, len, f) != len) { perror("fread urandom"); exit(1); }
-    fclose(f);
-}
 
 uint8_t *aes_cbc_encrypt(const uint8_t key[AES_KEY_SIZE],
                           const uint8_t *plain, size_t plain_len,
@@ -218,7 +209,7 @@ uint8_t *aes_cbc_encrypt(const uint8_t key[AES_KEY_SIZE],
 
     /* Generate random IV */
     uint8_t *iv = result;
-    read_urandom(iv, AES_IV_SIZE);
+    if (dcomms_random_bytes(iv, AES_IV_SIZE) != 0) { free(padded); free(result); return NULL; }
 
     /* CBC encrypt */
     uint8_t prev[AES_BLOCK_SIZE];

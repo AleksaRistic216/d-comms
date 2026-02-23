@@ -16,7 +16,7 @@ static inline char *mkdtemp(char *tmpl)
     return tmpl;
 }
 
-#  define DCOMMS_TEST_TMPDIR "%TEMP%\\dcomms_ptest_XXXXXX"
+#  define DCOMMS_TEST_TMPDIR "dcomms_ptest_XXXXXX"
 #else
 #  define DCOMMS_TEST_TMPDIR "/tmp/dcomms_ptest_XXXXXX"
 #endif
